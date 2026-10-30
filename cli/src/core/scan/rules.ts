@@ -1,60 +1,131 @@
 import { isAbsolute, normalize, join, dirname, extname } from "node:path";
 import { LinkifyIt } from "linkify-it";
-import { decodeText, isSymlink, MODE_EXEC, MODE_FILE, type SkillFile } from "../skill/files.ts";
+import {
+  decodeText,
+  isSymlink,
+  MODE_EXEC,
+  MODE_FILE,
+  startsWithShebang,
+  type SkillFile,
+} from "../skill/files.ts";
 import { asText, parseFrontmatter } from "../skill/frontmatter.ts";
 import { isValidSkillName, slugifySkillName } from "../skill/name.ts";
-import { mapMarkdown, type MarkdownMap } from "../skill/markdown.ts";
+import { mapMarkdown, type Context, type MarkdownMap } from "../skill/markdown.ts";
 import { codeFences, lineAt } from "../skill/text.ts";
 import { fileName, namedPaths, pathParts } from "./archive.ts";
-import { combine } from "./combine.ts";
-import { demotes } from "./context.ts";
+import { base64Exec, base64ExecMatches } from "./base64-exec.ts";
+import { combine, nearest } from "./combine.ts";
+import { credentialDisclosure } from "./credential-disclosure.ts";
+import { credentialPaths } from "./credential-paths.ts";
+import { confusableHost } from "./confusable-host.ts";
+import { demotes, type ProseJudge } from "./context.ts";
+import { dependencySource } from "./dependency-source.ts";
+import { destructive, destructiveMatches } from "./destructive.ts";
+import { embeddedSecrets } from "./embedded-secret.ts";
+import { invalidEncoding, isScriptOrMarkdown } from "./encoding.ts";
+import { escapedInvisibles } from "./escaped-invisible.ts";
+import { isMedia, misleadingExtension } from "./file-signature.ts";
 import { hiddenHtml } from "./hidden-html.ts";
 import { invisibleCharacters } from "./invisible.ts";
-import type { Finding, Scanner, Severity } from "./index.ts";
+import type { Confidence, Finding, ScannedSkill, Scanner, Severity } from "./index.ts";
+import { installHook } from "./install-hook.ts";
+import { linkMismatch } from "./link-mismatch.ts";
+import { isMap } from "./manifest.ts";
+import { moneyMovement, moneyPhrases } from "./money-movement.ts";
+import { persistence, persistenceMatches } from "./persistence.ts";
+import {
+  bare,
+  commandName,
+  EVALUATORS,
+  EXEC_SINK,
+  INTERPRETER,
+  isCodeFlag,
+  RUNS_ARGUMENT,
+  runsStdin,
+  scriptOperand,
+} from "./interpreter.ts";
+import { injections, promptInjection } from "./prompt-injection.ts";
+import { judgePhrases, proseSentences } from "./prose.ts";
 import { remoteInstructions } from "./remote-instructions.ts";
-import { lower, stronger } from "./severity.ts";
+import { reverseShell } from "./reverse-shell.ts";
+import { silentExec } from "./silent-exec.ts";
+import { suppressionComments } from "./suppression.ts";
+import { gated, lower, lowerConfidence, stronger, strongest } from "./severity.ts";
+import { urlCredentials } from "./url-credentials.ts";
 import { mapHome, shellStatements, type Command, type Statement } from "./shell.ts";
+import { whitespacePadding } from "./whitespace-padding.ts";
 
 export const RULES = {
-  "curl-pipe-shell": { help: "runs downloaded code" },
-  "base64-exec": { help: "decodes and runs base64" },
-  "exfil-domain": { help: "known exfiltration endpoint" },
-  "claude-settings": { help: "names agent settings or permissions" },
-  "skip-permissions": { help: "disables permission prompts" },
-  "credential-paths": { help: "reads credentials (~/.ssh, ~/.aws)" },
-  "env-secrets": { help: "reads env vars or .env" },
-  "prompt-injection": { help: "asks the agent to hide actions" },
-  destructive: { help: "recursive delete" },
-  "invisible-unicode": { help: "invisible characters" },
-  "hidden-html": { help: "text a reader does not see" },
-  "remote-instructions": { help: "fetches instructions to follow" },
-  "allowed-tools": { help: "pre-approves tools for itself" },
-  "disallowed-tools": { help: "takes a tool away from the agent" },
-  hooks: { help: "runs a configured command" },
-  "load-time-exec": { help: "runs before the skill loads" },
-  "context-fork": { help: "runs itself in a subagent" },
-  "user-invocable": { help: "hidden from you, still callable by the agent" },
-  "skill-config": { help: "sets how the agent runs it" },
-  "skill-name": { help: "declared name is not a valid skill name" },
-  "unknown-field": { help: "a frontmatter field niksi has no rule for" },
-  frontmatter: { help: "frontmatter could not be read" },
-  "frontmatter-inventory": { help: "frontmatter in a file no agent loads" },
-  "agent-config": { help: "bundles agent config" },
-  symlink: { help: "ships a symlink" },
-  executable: { help: "ships an executable" },
-  archive: { help: "ships an archive" },
-  "archive-contents": { help: "archive not fully scanned" },
-  binary: { help: "ships a binary" },
-  "external-url": { help: "links to an external host" },
-} as const;
+  "curl-pipe-shell": { help: "runs downloaded code", confidence: "high" },
+  "base64-exec": { help: "decodes and runs hidden code", confidence: "high" },
+  "reverse-shell": { help: "opens a shell to a remote host", confidence: "high" },
+  "exfil-domain": { help: "known exfiltration endpoint", confidence: "high" },
+  "claude-settings": { help: "names agent settings or permissions", confidence: "high" },
+  "skip-permissions": { help: "disables permission prompts", confidence: "high" },
+  "credential-paths": { help: "names a credential file", confidence: "high" },
+  "credential-disclosure": { help: "asks for a secret or sends one out", confidence: "medium" },
+  "env-secrets": { help: "reads env vars or .env", confidence: "high" },
+  "embedded-secret": { help: "ships a token or private key", confidence: "high" },
+  "url-credentials": { help: "puts a password in a URL or header", confidence: "high" },
+  "prompt-injection": { help: "asks the agent to hide actions", confidence: "medium" },
+  destructive: { help: "destroys data or loosens permissions", confidence: "high" },
+  persistence: { help: "installs something that runs again later", confidence: "high" },
+  "silent-exec": { help: "starts a detached or silenced process", confidence: "high" },
+  "dependency-source": {
+    help: "installs from a source it picks, or skips TLS checks",
+    confidence: "high",
+  },
+  "install-hook": { help: "runs a script when a package installs", confidence: "high" },
+  "money-movement": { help: "moves money", confidence: "medium" },
+  "suppression-comment": {
+    help: "author-side suppression comment ignored",
+    confidence: "high",
+  },
+  "invisible-unicode": { help: "invisible characters", confidence: "high" },
+  "hidden-html": { help: "text a reader does not see", confidence: "high" },
+  "escaped-invisible": { help: "escaped invisible characters", confidence: "high" },
+  "link-mismatch": { help: "link text names another host", confidence: "high" },
+  "confusable-host": { help: "mixes lookalike letters from other scripts", confidence: "high" },
+  "whitespace-padding": { help: "pushes text out of view", confidence: "high" },
+  "remote-instructions": { help: "fetches instructions to follow", confidence: "medium" },
+  "allowed-tools": { help: "pre-approves tools for itself", confidence: "high" },
+  "disallowed-tools": { help: "takes a tool away from the agent", confidence: "high" },
+  hooks: { help: "runs a configured command", confidence: "high" },
+  "load-time-exec": { help: "runs before the skill loads", confidence: "high" },
+  "context-fork": { help: "runs itself in a subagent", confidence: "high" },
+  "user-invocable": { help: "hidden from you, still callable by the agent", confidence: "high" },
+  "skill-config": { help: "sets how the agent runs it", confidence: "high" },
+  "skill-name": { help: "declared name is not a valid skill name", confidence: "high" },
+  "unknown-field": { help: "a frontmatter field niksi has no rule for", confidence: "high" },
+  frontmatter: { help: "frontmatter could not be read", confidence: "high" },
+  "frontmatter-inventory": { help: "frontmatter in a file no agent loads", confidence: "high" },
+  "agent-config": { help: "bundles agent config", confidence: "high" },
+  symlink: { help: "ships a symlink", confidence: "high" },
+  executable: { help: "ships an executable", confidence: "high" },
+  archive: { help: "ships an archive", confidence: "high" },
+  "archive-contents": { help: "archive not fully scanned", confidence: "high" },
+  binary: { help: "ships a binary", confidence: "high" },
+  "invalid-encoding": { help: "text that is not UTF-8", confidence: "high" },
+  "misleading-extension": { help: "content does not match its extension", confidence: "high" },
+  "external-url": { help: "links to an external host", confidence: "high" },
+} as const satisfies Record<string, { help: string; confidence: Confidence }>;
 
 export type Rule = keyof typeof RULES;
 
+type Fields = Omit<Finding, "rule" | "help" | "confidence"> & Partial<Pick<Finding, "confidence">>;
+
+// Without a confidence the finding takes its rule's: high for syntax, medium for prose intent.
 export const finding = (
   rule: Rule,
-  fields: Omit<Finding, "rule" | "help">,
+  { confidence = RULES[rule].confidence, ...fields }: Fields,
   help: string = RULES[rule].help,
-): Finding => ({ rule, help, ...fields });
+): Finding => ({
+  rule,
+  help,
+  ...fields,
+  confidence,
+  severity: gated(fields.severity, confidence),
+});
 
 const ARCHIVE_EXTS = new Set([".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar"]);
 
@@ -67,26 +138,6 @@ const AGENT_CONFIG_FILES = new Set([
   "opencode.jsonc",
 ]);
 
-// "?" matches any byte: a WebP stores its size at bytes 4 to 7.
-const MEDIA_MAGIC: Record<string, string[]> = {
-  ".png": ["\x89PNG\r\n\x1a\n"],
-  ".jpg": ["\xff\xd8\xff"],
-  ".jpeg": ["\xff\xd8\xff"],
-  ".gif": ["GIF87a", "GIF89a"],
-  ".webp": ["RIFF????WEBP"],
-  ".pdf": ["%PDF-"],
-  ".woff": ["wOFF"],
-  ".woff2": ["wOF2"],
-  ".ico": ["\0\0\x01\0"],
-};
-
-const isMedia = (file: SkillFile): boolean => {
-  const head = file.content.subarray(0, 12).toString("latin1");
-  return (MEDIA_MAGIC[extname(file.path).toLowerCase()] ?? []).some((magic) =>
-    [...magic].every((byte, i) => byte === "?" || head[i] === byte),
-  );
-};
-
 const binaryFinding = (file: SkillFile): Finding =>
   isMedia(file)
     ? finding("binary", {
@@ -95,9 +146,6 @@ const binaryFinding = (file: SkillFile): Finding =>
         detail: `media file (${extname(file.path).toLowerCase()})`,
       })
     : finding("binary", { severity: "warn", file: file.path, detail: "binary file" });
-
-const isScript = (file: SkillFile): boolean =>
-  file.content.subarray(0, 2).toString("latin1") === "#!";
 
 const fileFlags: Scanner = ({ files }) => {
   const findings: Finding[] = [];
@@ -119,7 +167,7 @@ const fileFlags: Scanner = ({ files }) => {
     }
     if (file.mode === MODE_EXEC) {
       // The scan reads a script's text, so only an opaque executable needs a look.
-      const script = isScript(file);
+      const script = startsWithShebang(file);
       findings.push(
         finding("executable", {
           severity: script ? "info" : "warn",
@@ -159,15 +207,24 @@ const fileFlags: Scanner = ({ files }) => {
   return findings;
 };
 
+const fileContent: Scanner = ({ files }) =>
+  files.flatMap((file) => {
+    if (isSymlink(file.mode)) return [];
+    const encoding = invalidEncoding(file, decodeText(file));
+    const signature = misleadingExtension(file);
+    return [
+      ...(encoding ? [finding("invalid-encoding", { file: file.path, ...encoding })] : []),
+      ...(signature ? [finding("misleading-extension", { file: file.path, ...signature })] : []),
+    ];
+  });
+
 // A media file's bytes decode to stray code points, and agents do not read it as text.
 const invisibleUnicode: Scanner = ({ files }) =>
   files.flatMap((file) => {
     const text = isMedia(file) ? undefined : decodeText(file)?.text;
     if (text === undefined) return [];
-    const injections = [...text.matchAll(PROMPT_INJECTION)].map((match) => ({
-      line: lineAt(text, match.index),
-    }));
-    const found = invisibleCharacters(text, injections);
+    const phrases = injections(text).map((match) => ({ line: lineAt(text, match.index) }));
+    const found = invisibleCharacters(text, phrases);
     return found ? [finding("invisible-unicode", { file: file.path, ...found })] : [];
   });
 
@@ -189,9 +246,6 @@ const fieldText = (key: string, value: unknown): string => {
   const text = asText(value).trim();
   return text ? `${key}: ${text}` : key;
 };
-
-const isMap = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const asList = (value: unknown): unknown[] => (Array.isArray(value) ? value : [value]);
 
@@ -434,6 +488,8 @@ interface PatternRule {
   rule: Rule;
   severity: Severity | Judge;
   pattern: RegExp;
+  // Every match holds one of these, ignoring case, so a file without any skips the pattern.
+  keywords?: readonly string[];
 }
 
 const lineBefore = (text: string, index: number): string =>
@@ -449,16 +505,12 @@ const CREDENTIAL_READ = String.raw`process\.env(?:\.|\[\s*["'\x60])${CREDENTIAL_
 const ENV_DUMP = String.raw`JSON\.stringify\(\s*process\.env\s*\)|dict\(\s*os\.environ\s*\)|os\.environ\.(?:copy|items)\(\s*\)`;
 const DOTENV_PATH = String.raw`(?<=["'/])\.env\b(?!\.(?:example|sample|template|dist)\b)`;
 
-const EXEC_SINK = String.raw`(?<![.\w])(?:eval|exec)\s*\(`;
 const NETWORK_OR_EXEC = new RegExp(
   String.raw`\bfetch\(|\brequests\.|\baxios[.(]|\bhttps?\.request\(|\bcurl\b|\bwget\b|${EXEC_SINK}|\bchild_process\b|\bsubprocess\.|\bos\.system\(`,
   "u",
 );
 
 const envSeverity: Judge = (_match, _file, text) => (NETWORK_OR_EXEC.test(text) ? "warn" : "info");
-
-const BASE64_DECODER = String.raw`b64decode|base64_decode|base64\.decode(?:bytes|string)|atob\s*\(|Buffer\.from\([^\n]*?["']base64["']|base64[ \t]+(?:-d|-D|--decode)\b`;
-const BASE64_SINK = String.raw`${EXEC_SINK}|(?<![.\w])eval[ \t]+["'$\x60]|\|[ \t]*(?:ba|z|da)?sh\b`;
 
 const EXFIL_HOST = String.raw`(?<![\w.-])(?:[\w-]+\.)*(?:(?:webhook\.site|requestbin\.com|pipedream\.net|ngrok(?:-free)?\.(?:io|app|dev))(?![\w-]|\.[\w-])|discord(?:app)?\.com\/api\/webhooks\/|api\.telegram\.org\/bot|hooks\.slack\.com\/services\/)`;
 
@@ -487,69 +539,49 @@ const settingsSeverity: Judge = (match, file, text) => {
   return isEntry(file.path) && OPENS_WITH_WRITE.test(sentence) ? "critical" : "warn";
 };
 
-// The idea of SC2114 and SC2115. No ShellCheck code is copied: ShellCheck is GPL-3.0.
-const IMPORTANT_PATHS = new Set(
-  "/ ~ $HOME ${HOME} /bin /boot /dev /etc /home /lib /lib64 /media /mnt /usr /usr/bin /usr/local /var /Users /System /Library".split(
-    " ",
-  ),
-);
-const UNGUARDED_VAR_DIR = /^\$\{?\w+\}?\/\*?$/u;
-
-const isImportantTarget = (token: string): boolean => {
-  const target = token.replaceAll(/["']/gu, "").replace(/(?<=.)[.,:]+$/u, "");
-  return (
-    UNGUARDED_VAR_DIR.test(target) || IMPORTANT_PATHS.has(target.replace(/\/\*?$/u, "") || "/")
-  );
-};
-
-const deleteSeverity: Judge = ({ groups }) => {
-  const { sudo, flags = "", targets = "" } = groups ?? {};
-  if (!/(?:^|\s)(?:-[a-zA-Z]*[rR]|--recursive\b)/u.test(flags)) return undefined;
-  const important = targets.split(/\s+/u).filter(Boolean).some(isImportantTarget);
-  return sudo || important ? "critical" : "info";
-};
-
-const PROMPT_INJECTION =
-  /ignore (all )?(previous|prior|above) instructions|do not (tell|inform) the user|without (telling|asking) the user/giu;
-
-const PATTERN_RULES: PatternRule[] = [
+export const PATTERN_RULES: PatternRule[] = [
   {
-    rule: "base64-exec",
-    severity: "critical",
-    pattern: new RegExp(
-      `(?:${BASE64_DECODER})[^\\n]*?(?:${BASE64_SINK})|(?:${BASE64_SINK})[^\\n]*?(?:${BASE64_DECODER})`,
-      "gu",
-    ),
+    rule: "exfil-domain",
+    severity: exfilSeverity,
+    pattern: new RegExp(EXFIL_HOST, "giu"),
+    keywords: [
+      "webhook.site",
+      "requestbin.com",
+      "pipedream.net",
+      "ngrok",
+      "discord",
+      "api.telegram.org/bot",
+      "hooks.slack.com/services/",
+    ],
   },
-  { rule: "exfil-domain", severity: exfilSeverity, pattern: new RegExp(EXFIL_HOST, "giu") },
   {
     rule: "claude-settings",
     severity: settingsSeverity,
     pattern: /\.claude\/settings(\.local)?\.json|permissions\.allow/gu,
+    keywords: [".claude/settings", "permissions.allow"],
   },
-  { rule: "skip-permissions", severity: "critical", pattern: /--dangerously-skip-permissions/gu },
   {
-    rule: "credential-paths",
+    rule: "skip-permissions",
     severity: "critical",
-    pattern: /~\/\.ssh\b|\bid_rsa\b|~\/\.aws\b/gu,
+    pattern: /--dangerously-skip-permissions/gu,
+    keywords: ["dangerously-skip-permissions"],
   },
   {
     rule: "env-secrets",
     severity: envSeverity,
     pattern: new RegExp(`${CREDENTIAL_READ}|${ENV_DUMP}|${DOTENV_PATH}`, "giu"),
-  },
-  {
-    rule: "prompt-injection",
-    severity: "warn",
-    pattern: PROMPT_INJECTION,
-  },
-  {
-    rule: "destructive",
-    severity: deleteSeverity,
-    pattern:
-      /\b(?<sudo>sudo(?:[ \t]+-\S*(?:[ \t]+[^\s-]\S*)??)*[ \t]+)?rm(?<flags>(?:[ \t]+--?[\w-]+)+)(?<targets>(?:[ \t]+[^\s;&|)`]+)*)/gu,
+    keywords: ["env"],
   },
 ];
+
+const KEYWORDS = new Map(
+  PATTERN_RULES.flatMap(({ rule, keywords }) =>
+    keywords ? [[rule, new RegExp(keywords.map(RegExp.escape).join("|"), "iu")] as const] : [],
+  ),
+);
+
+export const keywordMiss = ({ rule }: PatternRule, text: string): boolean =>
+  KEYWORDS.get(rule)?.test(text) === false;
 
 const lowerIf = (demoted: boolean, severity: Severity): Severity =>
   demoted ? lower(severity) : severity;
@@ -557,10 +589,8 @@ const lowerIf = (demoted: boolean, severity: Severity): Severity =>
 const PROHIBITION =
   /\b(never|do not|don't|must not|should not|avoid|refuses? (requests? )?to)\s+((ever\s+)?(run|execute|use|call|invoke|type|paste|pipe|ignore|pass)(ing)?\s+(\w+\s+with\s+)?)?[`'"]?$/iu;
 
-interface ProseContext {
+interface ProseContext extends ProseJudge {
   map?: MarkdownMap;
-  afterProhibition: (index: number) => boolean;
-  demoted: (index: number) => boolean;
 }
 
 // Only Markdown prose explains or demotes a command; code and scripts run it.
@@ -574,30 +604,42 @@ const proseContext = (file: SkillFile, text: string): ProseContext => {
   };
 };
 
-const patternFinding = (
-  { rule, severity, pattern }: PatternRule,
+interface PatternMatch {
+  match: RegExpExecArray;
+  severity: Severity;
+  quiet: boolean;
+}
+
+const patternMatches = (
+  { severity, pattern }: PatternRule,
   file: SkillFile,
   text: string,
   { afterProhibition, demoted }: ProseContext,
-): Finding | undefined => {
+): PatternMatch[] => {
   const judge = typeof severity === "function" ? severity : () => severity;
-  let count = 0;
-  let best: { match: RegExpExecArray; severity: Severity; quiet: boolean } | undefined;
-  for (const match of text.matchAll(pattern)) {
+  return [...text.matchAll(pattern)].flatMap((match) => {
     const judged = judge(match, file, text);
-    if (!judged) continue;
-    count++;
+    if (!judged) return [];
     const quiet = afterProhibition(match.index);
-    const current = quiet ? "info" : lowerIf(demoted(match.index), judged);
-    if (!best || stronger(current, best.severity)) best = { match, severity: current, quiet };
-  }
+    return [{ match, severity: quiet ? "info" : lowerIf(demoted(match.index), judged), quiet }];
+  });
+};
+
+const patternFinding = (
+  rule: PatternRule,
+  file: SkillFile,
+  text: string,
+  context: ProseContext,
+): Finding | undefined => {
+  const found = patternMatches(rule, file, text, context);
+  const best = strongest(found);
   if (!best) return undefined;
   const detail = [
     best.match[0].trim(),
     ...(best.quiet ? ["(in a warning)"] : []),
-    ...(count > 1 ? [`(${count} matches)`] : []),
+    ...(found.length > 1 ? [`(${found.length} matches)`] : []),
   ].join(" ");
-  return finding(rule, {
+  return finding(rule.rule, {
     severity: best.severity,
     file: file.path,
     line: lineAt(text, best.match.index),
@@ -610,40 +652,20 @@ const suspiciousPatterns: Scanner = ({ files }) =>
     const text = decodeText(file)?.text;
     if (text === undefined) return [];
     const context = proseContext(file, text);
-    return PATTERN_RULES.flatMap((rule) => patternFinding(rule, file, text, context) ?? []);
+    return PATTERN_RULES.flatMap((rule) =>
+      keywordMiss(rule, text) ? [] : (patternFinding(rule, file, text, context) ?? []),
+    );
   });
 
 const DOWNLOADERS = String.raw`curl|wget|fetch|iwr|irm|invoke-webrequest|invoke-restmethod`;
-const SHELLS = String.raw`(?:ba|z|da|k|a|fi)?sh`;
-const EVALUATORS = String.raw`iex|invoke-expression`;
-const INTERPRETERS = String.raw`${SHELLS}|python[\d.]*|node|bun|deno|perl|ruby|php|osascript|pwsh|powershell|${EVALUATORS}`;
 const DOWNLOADS = new RegExp(String.raw`(?<![\w-])(?:${DOWNLOADERS})(?![\w-])`, "iu");
 const DOWNLOADER = new RegExp(`^(?:${DOWNLOADERS})$`, "iu");
-const SHELL = new RegExp(`^${SHELLS}$`, "u");
-const INTERPRETER = new RegExp(`^(?:${INTERPRETERS})$`, "iu");
-const EVALUATOR = new RegExp(`^(?:${EVALUATORS})$`, "iu");
-const RUNS_ARGUMENT = /^(?:eval|source|\.|exec)$/u;
-const RUN_SUBCOMMAND = /^(?:bun|deno)$/iu;
-const SHELL_CODE_FLAG = /^-[a-zA-Z]*c[a-zA-Z]*$/u;
-const SHELL_STDIN_FLAG = /^-[a-zA-Z]*s[a-zA-Z]*$/u;
-const CODE_FLAG = /^-(?:c|e|m|r|p|-eval|-print|command)$/iu;
 const EVAL_OF_DOWNLOAD = new RegExp(
   String.raw`(?:${EXEC_SINK}|\bnew\s+Function\s*\()[^\n]*?(?:\burlopen|\brequests\.get|(?<![.\w])fetch)\s*\(|\b(?:${EVALUATORS})\b[^\n]*?\.downloadstring\s*\(|\.downloadstring\s*\([^\n]*?\|\s*(?:${EVALUATORS})\b`,
   "iu",
 );
 const URLRETRIEVE = /\burlretrieve\s*\(/u;
 const RUNS_PYTHON = new RegExp(String.raw`\bsubprocess\.|${EXEC_SINK}`, "u");
-
-const bare = (word: string): string =>
-  word
-    .replace(/^[(!"'`]+/u, "")
-    .replace(/[,:;!?)"'`]+$/u, "")
-    .replace(/(?<=.)\.$/u, "");
-
-const commandName = (word: string): string => bare(word).replace(/^.*\//u, "") || bare(word);
-
-const isCodeFlag = (name: string, word: string): boolean =>
-  (SHELL.test(name) ? SHELL_CODE_FLAG : CODE_FLAG).test(word);
 
 const isCommandWord = (word: string): boolean => {
   const name = commandName(word);
@@ -672,28 +694,6 @@ const commandText = (statement: Statement): string => {
 };
 
 const isDownload = (words: string[]): boolean => DOWNLOADER.test(commandName(words[0] ?? ""));
-
-// `bun run x.ts` and `deno run -A x.ts` name the script after the `run` subcommand.
-const scriptOperand = (name: string, args: string[]): string | undefined =>
-  (RUN_SUBCOMMAND.test(name) && args[0] === "run" ? args.slice(1) : args).find(
-    (arg) => !arg.startsWith("-"),
-  );
-
-// Prose words after an interpreter are not arguments unless they look like a path.
-const runsStdin = (words: string[], prose: boolean): boolean => {
-  const [command = "", ...args] = words;
-  const name = commandName(command);
-  if (!INTERPRETER.test(name)) return false;
-  if (EVALUATOR.test(name)) return true;
-  if (SHELL.test(name)) {
-    if (args.some((arg) => SHELL_STDIN_FLAG.test(arg))) return true;
-    // xargs supplies the command string after a trailing -c.
-    if (SHELL_CODE_FLAG.test(args.at(-1) ?? "")) return true;
-  }
-  if (args.some((arg) => isCodeFlag(name, arg))) return false;
-  const script = scriptOperand(name, args);
-  return script === undefined || (prose && !/[./]/u.test(script));
-};
 
 const runsSubstitution = (words: string[], command: Command): boolean => {
   const downloads = command.substitutions.filter((sub) => DOWNLOADS.test(sub.body));
@@ -789,7 +789,7 @@ interface Hit {
 
 const savedAndRun = (statements: Statement[]): Hit[] => {
   const files = combine(steps(statements, downloadTargets), steps(statements, runTargets), {
-    related: (download, run) => download.path === run.path,
+    key: (step) => step.path,
   }).map(({ anchor, partner }) => [anchor.statement, partner.statement] as const);
   const code = statements.filter((s) => s.kind !== "prose");
   const python = combine(
@@ -816,24 +816,36 @@ const statementSeverity = (statement: Statement, context: ProseContext): Severit
 const weakest = (severities: Severity[]): Severity =>
   severities.reduce((a, b) => (stronger(a, b) ? b : a));
 
+const downloadHits = (
+  statements: Statement[],
+  context: ProseContext,
+): { hit: Hit; severity: Severity }[] =>
+  [
+    ...statements
+      .filter(feedsInterpreter)
+      .map((statement) => ({ statements: [statement], detail: commandText(statement) })),
+    ...savedAndRun(statements),
+  ]
+    .toSorted((a, b) => a.statements[0]!.index - b.statements[0]!.index)
+    .map((hit) => ({
+      hit,
+      severity: weakest(hit.statements.map((s) => statementSeverity(s, context))),
+    }));
+
+const downloadLines = (
+  statements: Statement[],
+  context: ProseContext,
+): { severity: Severity; line: number }[] =>
+  downloadHits(statements, context).flatMap(({ hit, severity }) =>
+    hit.statements.map(({ line }) => ({ severity, line })),
+  );
+
 const downloadedCode: Scanner = ({ files }) =>
   files.flatMap((file) => {
     const text = decodeText(file)?.text;
     if (text === undefined || isSymlink(file.mode)) return [];
-    const context = proseContext(file, text);
-    const prose = isProse(file.path);
-    const statements = shellStatements(text, prose);
-    const hits: Hit[] = [
-      ...statements
-        .filter(feedsInterpreter)
-        .map((statement) => ({ statements: [statement], detail: commandText(statement) })),
-      ...savedAndRun(statements),
-    ].toSorted((a, b) => a.statements[0]!.index - b.statements[0]!.index);
-    let best: { hit: Hit; severity: Severity } | undefined;
-    for (const hit of hits) {
-      const severity = weakest(hit.statements.map((s) => statementSeverity(s, context)));
-      if (!best || stronger(severity, best.severity)) best = { hit, severity };
-    }
+    const hits = downloadHits(shellStatements(text, isProse(file.path)), proseContext(file, text));
+    const best = strongest(hits);
     if (!best) return [];
     const detail = [
       best.hit.detail,
@@ -859,24 +871,297 @@ const remoteInstructionText: Scanner = ({ files }) =>
     return found ? [finding("remote-instructions", { file: file.path, ...found })] : [];
   });
 
-const TEXT_SCANNERS = [downloadedCode, suspiciousPatterns, remoteInstructionText];
+type Located = Pick<Finding, "severity" | "line" | "detail"> & Partial<Pick<Finding, "confidence">>;
+
+const textRule =
+  (rule: Rule, detect: (file: SkillFile, text: string) => Located | undefined): Scanner =>
+  ({ files }) =>
+    files.flatMap((file) => {
+      const text = decodeText(file)?.text;
+      if (text === undefined || isSymlink(file.mode)) return [];
+      const found = detect(file, text);
+      return found ? [finding(rule, { file: file.path, ...found })] : [];
+    });
+
+const base64ExecText = textRule("base64-exec", (file, text) =>
+  base64Exec(text, shellStatements(text, isProse(file.path)), proseContext(file, text)),
+);
+
+const reverseShellText = textRule("reverse-shell", (file, text) =>
+  reverseShell(text, shellStatements(text, isProse(file.path)), proseContext(file, text)),
+);
+
+const credentialPathText = textRule("credential-paths", (file, text) =>
+  credentialPaths(shellStatements(text, isProse(file.path)), proseContext(file, text)),
+);
+
+const credentialDisclosureText = textRule("credential-disclosure", (file, text) => {
+  if (!isProse(file.path)) return undefined;
+  const context = proseContext(file, text);
+  return credentialDisclosure(text, proseSentences(text, context.map), context);
+});
+
+const moneyMovementText = textRule("money-movement", (file, text) => {
+  const context = proseContext(file, text);
+  return moneyMovement(text, isProse(file.path) ? proseSentences(text, context.map) : [], context);
+});
+
+const persistenceText = textRule("persistence", (file, text) =>
+  persistence(shellStatements(text, isProse(file.path)), proseContext(file, text)),
+);
+
+const destructiveText = textRule("destructive", (file, text) =>
+  destructive(text, shellStatements(text, isProse(file.path)), proseContext(file, text)),
+);
+
+interface ParsedText {
+  file: SkillFile;
+  text: string;
+  context: ProseContext;
+  statements: Statement[];
+}
+
+type PartnerRule =
+  | "curl-pipe-shell"
+  | "base64-exec"
+  | "persistence"
+  | "destructive"
+  | "money-movement";
+
+const PARTNER_MATCHES: Record<
+  PartnerRule,
+  (parsed: ParsedText) => { severity: Severity; line: number }[]
+> = {
+  "curl-pipe-shell": ({ statements, context }) => downloadLines(statements, context),
+  "base64-exec": ({ text, statements, context }) => base64ExecMatches(text, statements, context),
+  persistence: ({ statements, context }) => persistenceMatches(statements, context),
+  destructive: ({ text, statements, context }) => destructiveMatches(text, statements, context),
+  "money-movement": ({ file, text, context }) =>
+    judgePhrases(
+      text,
+      moneyPhrases(text, isProse(file.path) ? proseSentences(text, context.map) : []),
+      context,
+    ),
+};
+
+// A partner raises a match when it is above info and at most `within` lines away: 0 is the
+// same line, "file" anywhere in the file.
+interface Escalation {
+  partners: readonly PartnerRule[];
+  within: number | "file";
+}
+
+const SILENT_EXEC: Escalation = {
+  partners: ["curl-pipe-shell", "base64-exec", "persistence"],
+  within: "file",
+};
+
+const APPROVAL_BYPASS: Escalation = {
+  partners: ["money-movement", "persistence", "destructive", "curl-pipe-shell"],
+  within: 3,
+};
+
+// Partner findings anywhere in the skill raise a concealment phrase. A partner only in another
+// file lowers the confidence one level.
+const CONCEALMENT_PARTNERS: readonly Rule[] = [
+  "curl-pipe-shell",
+  "exfil-domain",
+  "remote-instructions",
+  "credential-paths",
+  "credential-disclosure",
+  "env-secrets",
+  "embedded-secret",
+  "url-credentials",
+  "persistence",
+  "money-movement",
+];
+
+// Most files match no anchor, so the partners are found only when one asks.
+const escalates = (
+  { partners, within }: Escalation,
+  parse: () => ParsedText,
+): ((line: number) => boolean) => {
+  let near: ((anchor: { line: number }) => unknown) | undefined;
+  return (line) => {
+    if (near === undefined) {
+      const parsed = parse();
+      const lines = partners
+        .flatMap((rule) => PARTNER_MATCHES[rule](parsed))
+        .filter(({ severity }) => severity !== "info");
+      near = nearest(lines, { within: within === "file" ? Infinity : within });
+    }
+    return near({ line }) !== undefined;
+  };
+};
+
+const silentExecText = textRule("silent-exec", (file, text) => {
+  const statements = shellStatements(text, isProse(file.path));
+  const context = proseContext(file, text);
+  return silentExec(
+    text,
+    statements,
+    context,
+    escalates(SILENT_EXEC, () => ({ file, text, context, statements })),
+  );
+});
+
+const dependencySourceText = textRule("dependency-source", (file, text) =>
+  dependencySource(
+    shellStatements(text, isProse(file.path)),
+    proseContext(file, text),
+    fileName(file) === "package.json" ? text : undefined,
+  ),
+);
+
+const installHookText = textRule("install-hook", (file, text) => installHook(fileName(file), text));
+
+// `fetch` sends only as a call or before a URL, so `git fetch origin` is not a send.
+const SENDS = new RegExp(
+  String.raw`(?<![\w-])(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)(?![\w-])|\bfetch\s*\(|(?<![\w-])fetch[ \t]+(?:-\S+[ \t]+)*https?:\/\/|\brequests\.|${EXFIL_HOST}`,
+  "iu",
+);
+
+const embeddedSecretText = textRule("embedded-secret", (_file, text) =>
+  embeddedSecrets(
+    text,
+    text.split("\n").flatMap((line, i) => (SENDS.test(line) ? [i + 1] : [])),
+  ),
+);
+
+const urlCredentialText = textRule("url-credentials", (_file, text) => urlCredentials(text));
+
+const suppressionText = textRule("suppression-comment", (_file, text) => suppressionComments(text));
+
+const TEXT_SCANNERS = [
+  downloadedCode,
+  base64ExecText,
+  reverseShellText,
+  suspiciousPatterns,
+  remoteInstructionText,
+  credentialPathText,
+  credentialDisclosureText,
+  embeddedSecretText,
+  urlCredentialText,
+  persistenceText,
+  destructiveText,
+  silentExecText,
+  dependencySourceText,
+  installHookText,
+  moneyMovementText,
+  suppressionText,
+];
+
+const concealment = (signals: Finding[]): ((path: string) => Confidence | undefined) => {
+  const paths = new Set(
+    signals
+      .filter((signal) => signal.severity !== "info" && CONCEALMENT_PARTNERS.includes(signal.rule))
+      .map((signal) => signal.file),
+  );
+  const own = RULES["prompt-injection"].confidence;
+  return (path) => {
+    if (paths.size === 0) return undefined;
+    return paths.has(path) ? own : lowerConfidence(own);
+  };
+};
+
+// `signals` are the other text findings of the skill, including those inside hidden text.
+const promptInjectionText = (skill: ScannedSkill, signals: Finding[]): Finding[] => {
+  const concealing = concealment(signals);
+  return textRule("prompt-injection", (file, text) => {
+    const context = proseContext(file, text);
+    return promptInjection(text, {
+      ...context,
+      confidence: RULES["prompt-injection"].confidence,
+      concealing: concealing(file.path),
+      hidden: (index) => context.map?.contextAt(index) === "hidden",
+      dangerNear: escalates(APPROVAL_BYPASS, () => ({
+        file,
+        text,
+        context,
+        statements: shellStatements(text, isProse(file.path)),
+      })),
+    });
+  })(skill);
+};
+
+const textFindings = (skill: ScannedSkill, hidden: Finding[]): Finding[] => {
+  const found = TEXT_SCANNERS.flatMap((scan) => scan(skill));
+  return [...found, ...promptInjectionText(skill, [...found, ...hidden])];
+};
 
 // Hidden text scans as a plain text file: no Markdown prose context can demote it.
-const scanHiddenText = (body: string): Finding[] =>
-  TEXT_SCANNERS.flatMap((scan) =>
-    scan({
-      name: "hidden",
-      files: [{ path: "hidden.txt", content: Buffer.from(body), mode: MODE_FILE }],
-    }),
-  );
+const plainText = (body: string): ScannedSkill => ({
+  name: "hidden",
+  files: [{ path: "hidden.txt", content: Buffer.from(body), mode: MODE_FILE }],
+});
 
-const hiddenText: Scanner = ({ files }) =>
+const scanHiddenText = (body: string): Finding[] => textFindings(plainText(body), []);
+
+const hiddenText = (
+  { files }: ScannedSkill,
+  scan: (body: string, path: string) => Finding[],
+): Finding[] =>
   files.flatMap((file) => {
     const text = isMarkdown(file.path) ? decodeText(file)?.text : undefined;
     if (text === undefined || isSymlink(file.mode)) return [];
-    const found = hiddenHtml(text, mapMarkdown(text).hidden, scanHiddenText);
+    const found = hiddenHtml(text, mapMarkdown(text).hidden, (body) => scan(body, file.path));
     return found ? [finding("hidden-html", { file: file.path, ...found })] : [];
   });
+
+const escapedInvisibleText = textRule("escaped-invisible", (file, text) =>
+  isMedia(file) ? undefined : escapedInvisibles(text),
+);
+
+const EXFIL_TARGET = new RegExp(`^(?:${EXFIL_HOST})`, "iu");
+
+const mismatchedLinks = (text: string): ReturnType<typeof linkMismatch> =>
+  linkMismatch(text, (hostAndPath) => EXFIL_TARGET.test(hostAndPath));
+
+const linkMismatchText = textRule("link-mismatch", (file, text) =>
+  isMarkdown(file.path) ? mismatchedLinks(text) : undefined,
+);
+
+const CODE_CONTEXTS = new Set<Context>(["inline", "fence", "indented"]);
+
+// Markdown is code only in code spans and blocks, `.txt` never, and any other text file always.
+const confusableHostText = textRule("confusable-host", (file, text) => {
+  if (isMedia(file)) return undefined;
+  if (!isMarkdown(file.path)) return confusableHost(text, () => !isProse(file.path));
+  let map: MarkdownMap | undefined;
+  return confusableHost(text, (index) =>
+    CODE_CONTEXTS.has((map ??= mapMarkdown(text)).contextAt(index)),
+  );
+});
+
+// Pushed text scans as plain text, as hidden text does, and also with the rules that read any text.
+const scanPushedText = (body: string): Finding[] => {
+  const link = mismatchedLinks(body);
+  return [
+    ...scanHiddenText(body),
+    ...[invisibleUnicode, escapedInvisibleText, confusableHostText].flatMap((scan) =>
+      scan(plainText(body)),
+    ),
+    ...(link ? [finding("link-mismatch", link)] : []),
+  ];
+};
+
+const MINIFIED = /\.min\./u;
+
+const whitespacePaddingText = textRule("whitespace-padding", (file, text) =>
+  isScriptOrMarkdown(file) && !MINIFIED.test(fileName(file))
+    ? whitespacePadding(text, scanPushedText)
+    : undefined,
+);
+
+const textScan: Scanner = (skill) => {
+  const insideHidden: Finding[] = [];
+  const hidden = hiddenText(skill, (body, path) => {
+    const found = scanHiddenText(body);
+    insideHidden.push(...found.map((inside) => ({ ...inside, file: path })));
+    return found;
+  });
+  return [...textFindings(skill, insideHidden), ...hidden];
+};
 
 // Fuzzy matching also finds schemeless hosts, such as `evil.sh` after curl.
 const linkify = new LinkifyIt({ fuzzyLink: true, fuzzyEmail: false, urlAuth: true });
@@ -959,10 +1244,14 @@ const urlInventory: Scanner = ({ files }) => {
 
 export const defaultScanners: Scanner[] = [
   fileFlags,
+  fileContent,
   invisibleUnicode,
+  escapedInvisibleText,
   frontmatterPrivileges,
   loadTimeExecution,
-  ...TEXT_SCANNERS,
-  hiddenText,
+  textScan,
+  linkMismatchText,
+  confusableHostText,
+  whitespacePaddingText,
   urlInventory,
 ];

@@ -1,4 +1,12 @@
 import type { MarkdownMap } from "../skill/markdown.ts";
+import type { Severity } from "./index.ts";
+import { lower } from "./severity.ts";
+import type { Statement } from "./shell.ts";
+
+export interface ProseJudge {
+  afterProhibition: (index: number) => boolean;
+  demoted: (index: number) => boolean;
+}
 
 const DEMOTED_DIRECTORIES = new Set(["references", "docs", "examples"]);
 
@@ -19,4 +27,27 @@ export const demotes = (parts: string[], map: MarkdownMap): ((index: number) => 
     if (context !== "prose" && context !== "inline") return false;
     return directory || DEMOTED_HEADING.test(map.headingAt(index) ?? "");
   };
+};
+
+export const judgeStatement = (
+  { kind, index }: Pick<Statement, "kind" | "index">,
+  { afterProhibition, demoted }: ProseJudge,
+): { quiet: boolean; judged: (severity: Severity) => Severity } => {
+  const prose = kind === "prose";
+  const quiet = prose && afterProhibition(index);
+  const lowered = kind === "comment" || (prose && demoted(index));
+  return {
+    quiet,
+    judged: (severity) => (quiet ? "info" : lowered ? lower(severity) : severity),
+  };
+};
+
+// A pattern match at `index` is judged as prose, or as a comment when it starts in one.
+export const judgeIndex = (
+  statements: readonly Pick<Statement, "kind" | "index">[],
+  index: number,
+  judge: ProseJudge,
+): ReturnType<typeof judgeStatement> => {
+  const within = statements.findLast((statement) => statement.index <= index);
+  return judgeStatement({ kind: within?.kind === "comment" ? "comment" : "prose", index }, judge);
 };

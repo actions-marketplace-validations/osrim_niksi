@@ -35,7 +35,13 @@ git@github.com:owner/repo.git     clone URL
 ./skills/my-skill                 local directory
 ```
 
-`owner/repo` always means GitHub. Every other forge needs a full URL. Segments after `owner/repo` name one skill: its path in the source, or else a skill whose name is the last segment. A URL path is the repository, so name the skill as a positional argument instead.
+`owner/repo` always means GitHub. Every other forge needs a full URL. A URL path is the repository, so name the skill as a positional argument instead.
+
+Segments after `owner/repo` name one skill. `add` resolves them in this order:
+
+1. The path of a skill that discovery finds in the source.
+2. A directory in the source that holds `SKILL.md`. That directory becomes the discovery root, as if you had typed its forge URL. This reaches skills that discovery skips, such as skills in hidden directories like `.claude/skills/x`.
+3. A skill whose name is the last segment.
 
 `niksi` rejects plain `http://` URLs, URLs that carry a username or password, and any coordinate that contains `#`.
 
@@ -231,6 +237,7 @@ nik audit [-g|-p] [--json]
       "findings": [
         {
           "severity": "warn",
+          "confidence": "medium",
           "rule": "prompt-injection",
           "help": "asks the agent to hide actions",
           "file": "SKILL.md",
@@ -245,7 +252,7 @@ nik audit [-g|-p] [--json]
 }
 ```
 
-`file` and `line` are absent when a finding has no location. Rule names are in [security-scan.md](security-scan.md).
+`file` and `line` are absent when a finding has no location. `confidence` is `high`, `medium`, or `low`. A `critical` match with `low` confidence has `severity` `warn`. Rule names and confidence are in [security-scan.md](security-scan.md#confidence).
 
 ## `disable`
 
