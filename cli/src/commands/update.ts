@@ -16,8 +16,11 @@ import {
   type InstalledSkill,
 } from "../core/install/destination.ts";
 import { tildify, type Scope } from "../core/paths.ts";
-import { criticalRules, type Finding } from "../core/scan/index.ts";
+import { CRITICAL_EXIT, criticalRules, type Finding } from "../core/scan/index.ts";
 import { integrityOf } from "../core/skill/integrity.ts";
+import { minReleaseAge, unixNow, type Cooldown } from "../core/source/release-age.ts";
+import { policyViolations } from "../core/policy.ts";
+import { readProjectConfig, type ProjectPolicy } from "../core/project-config.ts";
 import { displayLabel, shortId } from "../core/source/revision.ts";
 import {
   describeSelector,
@@ -28,6 +31,7 @@ import {
 import { resolveScope, scopeFlag, type ScopeOptions } from "../core/install/scope.ts";
 import {
   computeVerdicts,
+  holdsBack,
   requestedNames,
   selectUpdates,
   type MovedVerdict,
@@ -51,9 +55,11 @@ import { fail, withSpinner } from "../ui/prompt.ts";
 import { logError, logSkillError, logSourceCaution, warn } from "../ui/report.ts";
 import {
   emptyScopeMessage,
+  logSourceBlocked,
   reportDisabled,
   reportModified,
   reportVerdicts,
+  reportWaiting,
   revisionRange,
 } from "../ui/status.ts";
 import { dim, skillName } from "../ui/style.ts";
@@ -66,6 +72,7 @@ export const help: CommandHelp = {
     "$ nik up grilling prototype",
     "$ nik update --all -y",
     "$ nik update --source local -y",
+    "$ nik update --all -y --min-release-age 7",
     "$ nik update -g",
   ],
 };
@@ -74,12 +81,15 @@ interface UpdateOptions extends ScopeOptions, ReviewOptions {
   all?: boolean;
   report?: unknown;
   source?: unknown;
+  minReleaseAge?: unknown;
 }
 
 interface Selection {
   names: string[];
   source: SourceSelector | undefined;
   all: boolean;
+  cooldown: Cooldown;
+  policy: ProjectPolicy | undefined;
 }
 
 export const run = async (names: string[], options: UpdateOptions): Promise<void> => {
@@ -87,10 +97,25 @@ export const run = async (names: string[], options: UpdateOptions): Promise<void
   const reportPath = await reportTarget(options.report);
   p.intro("nik update");
   const scope = resolveScope(options, p.log.warn) ?? "project";
+  const { minimumReleaseAge, policy } = await readProjectConfig(scope);
+  const days = minReleaseAge(options.minReleaseAge, minimumReleaseAge);
   await migrateIfLegacy(scope);
-  const report: UpdateReport = { scope, updated: [], blocked: [], skipped: [], upToDate: [] };
-  const selection = { names, source, all: source !== undefined || (options.all ?? false) };
-  const outro = await updateScope(selection, options, report);
+  const report: UpdateReport = {
+    scope,
+    updated: [],
+    blocked: [],
+    skipped: [],
+    upToDate: [],
+    sourceBlocked: [],
+  };
+  const selection = {
+    names,
+    source,
+    all: source !== undefined || (options.all ?? false),
+    cooldown: { days, now: unixNow() },
+    policy,
+  };
+  const outro = await updateScope(selection, { ...options, denyWarn: policy?.denyWarn }, report);
   if (reportPath) await writeReport(reportPath, report);
   p.outro(outro);
 };
@@ -147,22 +172,17 @@ const reportTarget = async (value: unknown): Promise<string | undefined> => {
 };
 
 const updateScope = async (
-  { names, source, all }: Selection,
+  selection: Selection,
   options: UpdateOptions,
   report: UpdateReport,
 ): Promise<string> => {
+  const { names, all, cooldown } = selection;
   const { scope } = report;
   const loaded = await loadLock(scope);
-  const scoped = fromSource(loaded.lock, source);
+  const scoped = fromSource(loaded.lock, selection.source);
   if (Object.keys(scoped.skills).length === 0) return emptyScopeMessage(scope);
-  const { enabled, disabled } = splitDisabled(scoped);
-  const skills = installedSkills(enabled);
-  const disabledNames = Object.keys(disabled.skills).toSorted();
-  refuseDisabled(names, disabledNames, scope);
-  reportDisabled(disabledNames, scope);
-  report.skipped.push(...disabledNames.map((name) => ({ kind: "disabled" as const, name })));
+  const skills = checkedSkills(scoped, selection, report);
   if (skills.length === 0) return "Nothing to update.";
-  refuseUnknown(names, skills);
 
   const modified = await modifiedSkills(skills, scope);
   if (modified.size > 0) {
@@ -174,7 +194,7 @@ const updateScope = async (
 
   const verdicts = await withSpinner(
     `Checking upstream for ${skills.length} skill(s)`,
-    () => computeVerdicts(skills, names),
+    () => computeVerdicts(skills, names, cooldown),
     () => "Checked upstream sources",
   );
   recordVerdicts(report, verdicts);
@@ -189,6 +209,39 @@ const updateScope = async (
   const prepared = await previewAndReview(selected, scope, options, report);
   if (prepared.length === 0) return "Nothing selected.";
   return writeUpdates(prepared, loaded, options, report);
+};
+
+const checkedSkills = (
+  scoped: Lockfile,
+  { names, policy }: Selection,
+  report: UpdateReport,
+): InstalledSkill[] => {
+  const { scope } = report;
+  const { enabled, disabled } = splitDisabled(scoped);
+  const skills = installedSkills(enabled);
+  const disabledNames = Object.keys(disabled.skills).toSorted();
+  refuseDisabled(names, disabledNames, scope);
+  reportDisabled(disabledNames, scope);
+  report.skipped.push(...disabledNames.map((name) => ({ kind: "disabled" as const, name })));
+  if (skills.length === 0) return [];
+  refuseUnknown(names, skills);
+  return blockSources(skills, policy, report);
+};
+
+const blockSources = (
+  skills: InstalledSkill[],
+  policy: ProjectPolicy | undefined,
+  report: UpdateReport,
+): InstalledSkill[] => {
+  const violations = policyViolations(policy, skills);
+  if (violations.length === 0) return skills;
+  for (const violation of violations) logSourceBlocked(violation);
+  process.exitCode = CRITICAL_EXIT;
+  const blocked = new Set(violations.map(({ name }) => name));
+  for (const { name, source } of skills) {
+    if (blocked.has(name)) report.sourceBlocked.push({ name, source });
+  }
+  return skills.filter(({ name }) => !blocked.has(name));
 };
 
 const refuseDisabled = (names: string[], disabledNames: string[], scope: Scope): void => {
@@ -226,12 +279,24 @@ const chooseUpdates = async (
   }
   const selectedNames = new Set(selected.map((verdict) => verdict.skill.name));
   for (const verdict of candidates) {
-    if (!selectedNames.has(verdict.skill.name)) {
+    if (selectedNames.has(verdict.skill.name)) continue;
+    if (holdsBack(verdict, names)) recordWaiting(verdict, report);
+    else {
       p.log.info(`${skillName(verdict.skill.name)}: update available, not selected`);
       report.skipped.push({ kind: "not-selected", name: verdict.skill.name });
     }
   }
   return selected;
+};
+
+const recordWaiting = (verdict: UpdatableVerdict, report: UpdateReport): void => {
+  reportWaiting(verdict, report.scope);
+  report.skipped.push({
+    kind: "waiting",
+    name: verdict.skill.name,
+    to: verdict.upstream,
+    age: verdict.age ?? 0,
+  });
 };
 
 const writeUpdates = async (

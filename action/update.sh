@@ -65,7 +65,7 @@ open_pull_request() {
   if git diff --cached --quiet; then
     echo "Nothing to update."
     if [ -n "$open" ]; then
-      gh pr close "$number" --delete-branch --comment "\`nik update\` found nothing to update, so this pull request is no longer needed."
+      gh pr close "$number" --delete-branch --comment "\`nik update\` found no update to apply, so this pull request is no longer needed. The job summary lists any skill that waits for the cooldown."
     fi
     return
   fi
@@ -95,7 +95,7 @@ fi
 
 case "$status" in
   0) ;;
-  3) echo "::error::Critical findings blocked a skill, and only a person can approve them. Run nik update <skill> in a terminal, review the findings, and commit niksi-lock.json." ;;
+  3) echo "::error::A skill needs a person. Findings need approval in a terminal with nik update <skill>, or niksi.json doesn't allow its source. The job summary lists each one under Needs a person." ;;
   *)
     echo "::error::nik update exited $status. See https://github.com/osrim/niksi/blob/main/docs/ci.md#exit-codes"
     exit "$status"

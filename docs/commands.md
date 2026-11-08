@@ -20,7 +20,7 @@ Commands, flags, aliases, and exit codes are compatibility contracts. Paths, env
 ## `add`
 
 ```text
-nik add <coordinate> [...skills] [-g|-p] [-a] [-y] [--agent <id>] [--copy [--path <directory>]] [--dangerous-skip-critical-approval]
+nik add <coordinate> [...skills] [-g|-p] [-a] [-y] [--agent <id>] [--copy [--path <directory>]] [--dangerous-skip-critical-approval] [--min-release-age <days>]
 ```
 
 A coordinate names a source:
@@ -52,7 +52,10 @@ Segments after `owner/repo` name one skill. `add` resolves them in this order:
   The lockfile records this discovery root as `root`.
 - Named skills must exist in the source and have distinct names.
 - `@ref` pins the skill. A pinned skill updates only when you name it in `nik update`.
+- Without `@ref`, `add` installs the upstream revision even when it is younger than the [cooldown](#cooldown), and prints one warning with its age: `v2.0.0 is 1 day old, inside the 3-day cooldown.` `--min-release-age 0` turns the warning off.
 - `add` shows and scans every file before writing. `Read files…` at the review questions opens the files in a pager. See [security-scan.md](security-scan.md).
+- In project scope, `add` checks the source against the policy in `niksi.json` before it fetches anything, so it asks for the scope first. When the policy doesn't allow the source, `add` names it, adds nothing, and exits `1`. See [Project configuration](configuration.md#project-configuration).
+- When `niksi.json` sets `policy.denyWarn`, a warn finding needs approval like a critical one, and `--yes` doesn't accept it. See [security-scan.md](security-scan.md#severities).
 - `add` offers to review missing dependencies mentioned by approved skills. With
   `--yes` or without a terminal, it prints a `nik add` command instead. This
   command uses the same discovery root.
@@ -79,6 +82,8 @@ nik install [-g|-p] [-y] [--agent <id>]
 
 `install` does not scan. `add` or `update` reviewed every entry, and `install` verifies each file against the recorded integrity before writing it. An entry whose content does not match is skipped and the command exits `1`.
 
+In project scope, `install` first checks every enabled entry against the policy in `niksi.json`. When an entry comes from a source that the policy doesn't allow, `install` names each such entry and its source, installs nothing, and exits `1`. See [Project configuration](configuration.md#project-configuration).
+
 For a local source, `install` reads the source directory even when the store holds the recorded content. If the source changed since `niksi-lock.json`, `install` skips the entry, names `nik update <skill>`, and exits `1`. If the source no longer has the skill, `install` skips the entry, names `nik remove <skill>`, and exits `1`.
 
 Restoring a modified skill discards your edits, so `install` asks first. Without a terminal it keeps the edits and installs the other entries. `--yes` restores without asking.
@@ -92,13 +97,14 @@ Link entries install to the agents recorded in the entry. A link entry without r
 ## `update`
 
 ```text
-nik update [...skills] [-g|-p] [-a] [--source <coordinate>] [-y] [--dangerous-skip-critical-approval] [--report <file>]
+nik update [...skills] [-g|-p] [-a] [--source <coordinate>] [-y] [--dangerous-skip-critical-approval] [--report <file>] [--min-release-age <days>]
 ```
 
 `update` checks every installed skill against its source, then shows and scans changed files before writing.
 
 - Without names, `--all`, or `--source`, it opens a picker of every skill with an available update.
 - Pinned skills update only when named.
+- `--all` and `--source` leave out a changed skill whose upstream revision is younger than the [cooldown](#cooldown). The picker lists it unselected.
 - `--source <coordinate>` selects the skills from one source as `--all` selects them from the scope. It leaves out pinned skills. `update` checks only that source upstream. The coordinate is `owner/repo`, a Git URL, or a local path. A local path selects every recorded skill in that directory or below it. `--source local` selects every local source. To select a directory named `local`, pass `./local`. `--all` with `--source` selects the same skills as `--source` alone.
 - `--source` exits `2` when you pass it twice, pass it with skill names, or give it a coordinate with a skill segment, a forge URL path, or `@ref`. A source with no recorded skills exits `1`.
 - Every update candidate goes through the same selection and confirmation. A skill whose revision moved without file changes shows `no file changes` instead of a diff and skips the review gate.
@@ -126,7 +132,28 @@ nik update [...skills] [-g|-p] [-a] [--source <coordinate>] [-y] [--dangerous-sk
 - Updating a modified skill discards your edits. Run `nik install` to restore the locked files instead.
 - `update` compares and updates each path copy at its recorded project-relative destination.
 - `update` does not check disabled skills. It names them in one info line. With `--source`, it names only the disabled skills from that source. If you name a disabled skill, `update` exits `1` and names `nik enable`.
+- In project scope, `update` leaves out each skill whose source the policy in `niksi.json` doesn't allow, and doesn't check that source upstream. It names each such skill and its source, keeps it at its recorded revision, updates the other skills, and exits `3`. Remove the skill with `nik remove`, or allow its source in `niksi.json`. See [Project configuration](configuration.md#project-configuration).
+- When `niksi.json` sets `policy.denyWarn`, a warn finding in changed files needs approval like a critical one, and `--yes` doesn't accept it. See [security-scan.md](security-scan.md#severities).
 - `--report <file>` writes a Markdown review of the run. See [Update report](#update-report).
+
+### Cooldown
+
+An upstream revision that changes a skill's files waits 3 days before `update` takes it on its own, so a tag pushed from a hijacked maintainer account doesn't reach every `nik update --all --yes` the same day. The age is the Git committer date of the revision `update` would move to: the commit of the latest stable tag, or the head of the branch when the source has no tag. A commit dated in the past passes at once; see [security-scan.md](security-scan.md#limits). When a source has no tag and its branch gets a commit at least every few days, a changed skill from it can keep waiting under `--all`, because each new commit is young. Run `nik update <skill>` to update it.
+
+- `--all` and `--source` leave a waiting skill at its recorded revision and print why:
+
+  ```text
+  tdd: v2.0.0 available, 1 day old, waits for cooldown
+  Run nik update tdd to update it now.
+  ```
+
+- The picker shows each candidate's age and marks a waiting one with `waits for cooldown`. Pick it to update it now. A waiting skill you leave unpicked prints the same lines.
+- Naming a skill updates it now: `nik update tdd`. So does an explicit ref in `nik add owner/repo/tdd@v2`.
+- `--yes` accepts confirmations, not upstream revisions. A waiting skill keeps waiting.
+- A skill whose revision moved without file changes has no cooldown. `--all` and `--source` take it at once, and the picker doesn't mark it as waiting.
+- Pinned skills and local sources have no cooldown.
+- `minimumReleaseAge` in a project's `niksi.json` sets the cooldown for that project. See [Project configuration](configuration.md#project-configuration).
+- `--min-release-age <days>` sets the cooldown for one run, over `niksi.json`. `0` turns it off.
 
 ### Update report
 
@@ -135,8 +162,8 @@ nik update [...skills] [-g|-p] [-a] [--source <coordinate>] [-y] [--dangerous-sk
 The report has these sections. A section with no skills is left out.
 
 - **Updated**: each written skill with its old and new revision, the diff stat, and its findings grouped by severity. A moved revision shows `No file changes.` instead.
-- **Needs a person**: each skill that critical findings blocked, with the same detail and the `nik update` command to run in a terminal.
-- **Not updated**: each other skill and its reason: declined at review, write not confirmed, update available but not selected, write failed, pinned, pinned ref rewritten, no longer in the source, no upstream, or disabled.
+- **Needs a person**: each skill that critical findings blocked, or warn findings under `policy.denyWarn`, with the same detail and the `nik update` command to run in a terminal. Then each skill whose source the project policy doesn't allow, with its source.
+- **Not updated**: each other skill and its reason: declined at review, write not confirmed, update available but not selected, waiting for the cooldown with the upstream revision's age, write failed, pinned, pinned ref rewritten, no longer in the source, no upstream, or disabled.
 - **Up to date**: the names of the checked skills that had no update.
 
 When every section is empty, the report says `No skill changed.` The report puts upstream text, such as tags, file names, and finding details, in code spans and fences, so a skill can't add Markdown or HTML to the page.
@@ -283,6 +310,7 @@ nik enable [...skills|source] [-g|-p] [-a] [-y] [--agent <id>]
 - Select skills and sources as in `disable`. `--all` selects every disabled skill. A skill that is already enabled prints `name: already enabled`.
 - Link entries restore to their recorded agents. A link entry without recorded agents needs agents: `enable` uses `--agent`, else the remembered choice, else the detected defaults, else a prompt, and records them in the entry. Agent copies and path copies restore to their recorded agents or destination root. A selection with no link entry that lacks recorded agents selects no agents.
 - If the content of an entry does not match its integrity, `enable` reports it as `install` does. The entry stays disabled. The command exits `1`.
+- In project scope, `enable` checks the selected entries against the policy in `niksi.json` first, as `install` does. When an entry comes from a source that the policy doesn't allow, `enable` names each such entry, enables nothing, and exits `1`.
 
 For global scope, `lockfile` reports the effective path: the config path, or the legacy data path while `niksi` still uses one. See [Moving an existing global lockfile](configuration.md#moving-an-existing-global-lockfile).
 
@@ -347,16 +375,17 @@ An unknown shell exits `2`.
 | `-p`, `--project` | all but `prune` and `completion` | Use project scope. |
 | `--agent <id>` | `add`, `install`, `enable` | Install to `universal`, `claude`, `opencode`, `kiro`, `cline`, or `qwen`. An agent name such as `cursor` or `codex` resolves to the directory that agent reads. Repeat the flag or separate values with commas. |
 | `-a`, `--all` | `add`, `update`, `remove`, `disable`, `enable` | Select every skill. `disable` selects enabled skills and `enable` selects disabled skills. It does not confirm or approve anything. |
-| `-y`, `--yes` | `add`, `install`, `update`, `remove`, `disable`, `enable`, `prune` | Accept ordinary confirmations and defaults. It cannot approve critical findings. |
+| `-y`, `--yes` | `add`, `install`, `update`, `remove`, `disable`, `enable`, `prune` | Accept ordinary confirmations and defaults. It cannot approve critical findings, or warn findings under `policy.denyWarn`. |
 | `--dangerous-skip-critical-approval` | `add`, `update` | Skip approval for critical findings. Dangerous. Files and findings remain visible. |
 | `--copy` | `add` | Write directories instead of links. |
 | `--path <directory>` | `add` | With `--copy`, write named skill directories below a project destination root. |
 | `--json` | `list`, `audit` | Write JSON only. |
 | `--report <file>` | `update` | Write a Markdown review report. |
+| `--min-release-age <days>` | `add`, `update` | Set the [cooldown](#cooldown) in whole days. Default `3`, or `minimumReleaseAge` from `niksi.json` in project scope. `0` turns it off. |
 
 `-g` and `-p` cannot be combined. Passing both exits `2`. An unknown `--agent` value exits `2`.
 
-`--dangerous-skip-critical-approval` applies only to the current invocation, including dependencies reviewed by `add`. It does not imply `--yes`, `--all`, a scope, an agent, `--copy`, or `--path`. Warn finding review and write confirmation keep their existing behavior. The flag is never saved in the lockfile or configuration and has no environment-variable equivalent. The critical findings it skipped are recorded as accepted for that content; see [security-scan.md](security-scan.md#accepted-findings).
+`--dangerous-skip-critical-approval` applies only to the current invocation, including dependencies reviewed by `add`. It does not imply `--yes`, `--all`, a scope, an agent, `--copy`, or `--path`. Warn finding review and write confirmation keep their existing behavior, except that under `policy.denyWarn` warn findings gate as critical, so the flag skips them too. The flag is never saved in the lockfile or configuration and has no environment-variable equivalent. The critical findings it skipped are recorded as accepted for that content; see [security-scan.md](security-scan.md#accepted-findings).
 
 `add` asks for the scope when neither flag is present. `--path` selects project scope without asking. The other commands default to project scope.
 
@@ -373,10 +402,10 @@ Running a command from your home directory selects global scope.
 | Scope or agents | Pass `-g`, `-p`, or `--agent`. |
 | Path-copy destination | Pass `--copy --path <directory>`. Do not pass an agent flag. |
 | Write confirmation | Pass `--yes`. |
-| Warn finding review | Pass `--yes`. |
+| Warn finding review | Pass `--yes`. Under `policy.denyWarn`, it needs the critical finding approval instead. |
 | Critical finding approval | Run in a terminal, or pass `--dangerous-skip-critical-approval` to skip approval. |
 
-An ordinary prompt with no terminal and no replacement flag exits `2`. In `add` and `update`, critical findings instead block the skill with exit `3` unless `--dangerous-skip-critical-approval` is provided. `install` keeps modified skills and continues when there is no terminal.
+An ordinary prompt with no terminal and no replacement flag exits `2`. In `add` and `update`, critical findings, and warn findings under `policy.denyWarn`, instead block the skill with exit `3` unless `--dangerous-skip-critical-approval` is provided. `install` keeps modified skills and continues when there is no terminal.
 
 Ctrl-C exits `130`. Files already written stay written.
 
@@ -396,9 +425,9 @@ install -m 755 nik /usr/local/bin/nik
 nik install --agent claude --yes
 ```
 
-Git 2.30 or later must be on `PATH`. `nik install` exits `0` when every enabled entry in `niksi-lock.json` is on disk with its recorded integrity and every local source still matches it. It exits `1` when a local skill's source changed since `niksi-lock.json` or no longer has the skill. Run `nik update <skill>` or `nik remove <skill>` and commit the lockfile. `CI` disables the update notice and its release check.
+Git 2.30 or later must be on `PATH`. `nik install` exits `0` when every enabled entry in `niksi-lock.json` is on disk with its recorded integrity and every local source still matches it. It exits `1` when a local skill's source changed since `niksi-lock.json` or no longer has the skill. Run `nik update <skill>` or `nik remove <skill>` and commit the lockfile. It also exits `1`, and installs nothing, when an entry comes from a source that the policy in `niksi.json` doesn't allow. `CI` disables the update notice and its release check.
 
-`nik add` and `nik update` also run without a terminal. `--yes` accepts warn findings. A critical finding exits `3` unless `--dangerous-skip-critical-approval` skips approval. `nik list --json` prints machine-readable output.
+`nik add` and `nik update` also run without a terminal. `--yes` accepts warn findings, unless `niksi.json` sets `policy.denyWarn`. A critical finding exits `3` unless `--dangerous-skip-critical-approval` skips approval. `nik list --json` prints machine-readable output.
 
 For reviewed sources whose critical findings you accept, use CI to keep a repository's published skill copies current. Every run still lists files, scans them, and prints all findings:
 
@@ -415,7 +444,7 @@ nik update --source local --yes
 git diff --quiet niksi-lock.json || git commit -m "chore: record skill integrity" niksi-lock.json
 ```
 
-To open a pull request for updates, write a report and use it as the body. Without `--dangerous-skip-critical-approval`, a skill with critical findings stays at its recorded revision and the command exits `3`. The report lists it under **Needs a person**, so the pull request still carries the other updates:
+To open a pull request for updates, write a report and use it as the body. Without `--dangerous-skip-critical-approval`, a skill with critical findings stays at its recorded revision and the command exits `3`. The same goes for a skill that the policy in `niksi.json` blocks. The report lists it under **Needs a person**, so the pull request still carries the other updates:
 
 ```sh
 report="$(mktemp)"
@@ -430,14 +459,14 @@ git push -u origin skill-updates
 gh pr create --title "chore: update skills" --body-file "$report"
 ```
 
-The report is written outside the repository, so `git add -A` does not commit it. When critical findings block every update, nothing changes and the script exits `3`, so the job fails instead of hiding the findings.
+The report is written outside the repository, so `git add -A` does not commit it. A changed skill whose upstream revision is inside the [cooldown](#cooldown) waits for a later run, and the report lists it under **Not updated**. When critical findings block every update, nothing changes and the script exits `3`, so the job fails instead of hiding the findings.
 
 ## Exit codes
 
 | code | meaning |
 | --- | --- |
 | `0` | Success or nothing to do. |
-| `1` | A skill failed. The rest of the batch still ran. In `install` and `enable`, this includes a local source that changed since `niksi-lock.json` or no longer has the skill. In `audit`, also a warn finding. |
-| `2` | Invalid usage, or a prompt had no terminal and no flag. |
-| `3` | Critical findings blocked at least one skill in `add` or `update` without `--dangerous-skip-critical-approval`. In `audit`, a critical finding in an installed skill whose rule the lockfile entry does not accept. Accepted critical findings do not change the `audit` exit code. |
+| `1` | A skill failed. The rest of the batch still ran. In `install` and `enable`, this includes a local source that changed since `niksi-lock.json` or no longer has the skill. In `install` and `enable`, also an entry from a source that the policy in `niksi.json` doesn't allow, and in `add`, a source that the policy doesn't allow. Then the command writes nothing. In `audit`, also a warn finding. |
+| `2` | Invalid usage, an invalid `niksi.json`, or a prompt had no terminal and no flag. |
+| `3` | Critical findings, or warn findings under `policy.denyWarn`, blocked at least one skill in `add` or `update` without `--dangerous-skip-critical-approval`. In `update`, also a skill whose source the policy in `niksi.json` doesn't allow. In `audit`, a critical finding in an installed skill whose rule the lockfile entry does not accept. Accepted critical findings do not change the `audit` exit code. When a run has reasons for both `1` and `3`, it exits `3`. |
 | `130` | Cancelled. |

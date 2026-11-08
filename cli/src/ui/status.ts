@@ -1,6 +1,9 @@
 import * as p from "@clack/prompts";
 import { readLock } from "../core/install/lockfile.ts";
 import type { Scope } from "../core/paths.ts";
+import type { PolicyViolation } from "../core/policy.ts";
+import { PROJECT_CONFIG_NAME } from "../core/project-config.ts";
+import { describeAge, describeWaiting } from "../core/source/release-age.ts";
 import { displayLabel, shortId } from "../core/source/revision.ts";
 import { otherScope, scopeFlag } from "../core/install/scope.ts";
 import {
@@ -10,6 +13,7 @@ import {
   type UpdatableVerdict,
   type UpdateVerdict,
 } from "../core/source/upstream.ts";
+import { fail } from "./prompt.ts";
 import { logError, logWarn, warn } from "./report.ts";
 import { bold, dim, skillName, tildify } from "./style.ts";
 
@@ -46,6 +50,20 @@ export const reportDisabled = (names: string[], scope: Scope): void => {
   );
 };
 
+export const refuseViolations = (violations: PolicyViolation[], outcome: string): void => {
+  if (violations.length === 0) return;
+  for (const { name, reason } of violations) logError(`${skillName(name)}: ${reason}`);
+  fail(
+    `${outcome}\nRemove these skills with \`nik remove\`, or allow their sources in ${PROJECT_CONFIG_NAME}.`,
+  );
+};
+
+export const logSourceBlocked = ({ name, reason }: PolicyViolation): void => {
+  logError(
+    `${skillName(name)}: ${reason}\nRemove it with \`nik remove ${name}\`, or allow its source in ${PROJECT_CONFIG_NAME}.`,
+  );
+};
+
 export const warnRestored = (name: string): void => {
   warn(`${skillName(name)}: restored local edits from the source`);
 };
@@ -71,7 +89,7 @@ export const reportVerdicts = (
     const { skill } = verdict;
     const failed = (message: string): void => {
       logError(message);
-      if (requested.includes(skill.name)) process.exitCode = 1;
+      if (requested.includes(skill.name)) process.exitCode = process.exitCode === 3 ? 3 : 1;
     };
     switch (verdict.kind) {
       case "unreachable":
@@ -107,10 +125,24 @@ export const reportVerdicts = (
 const describeAhead = (verdict: OutdatedVerdict): string =>
   verdict.ahead > 0 ? `${verdict.ahead} new commit(s)` : "content changed";
 
-export const describeUpdate = (verdict: UpdatableVerdict): string => {
+const describeChange = (verdict: UpdatableVerdict): string => {
   if (verdict.kind === "moved") return "no file changes";
   const range = revisionRange(verdict);
   return range ? `${describeAhead(verdict)} (${range})` : describeAhead(verdict);
+};
+
+export const describeUpdate = (verdict: UpdatableVerdict): string =>
+  [
+    describeChange(verdict),
+    ...(verdict.age === undefined ? [] : [describeAge(verdict.age)]),
+    ...(verdict.kind === "outdated" && verdict.waiting ? ["waits for cooldown"] : []),
+  ].join(", ");
+
+export const reportWaiting = (verdict: UpdatableVerdict, scope: Scope): void => {
+  const { skill, upstream, age = 0 } = verdict;
+  p.log.info(
+    `${skillName(skill.name)}: ${describeWaiting(displayLabel(upstream), age)}\nRun ${dim(`nik update ${skill.name}${scopeFlag(scope)}`)} to update it now.`,
+  );
 };
 
 export const revisionRange = (verdict: UpdatableVerdict): string => {

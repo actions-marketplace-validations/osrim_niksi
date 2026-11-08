@@ -1,6 +1,8 @@
 import { scopeFlag } from "./install/scope.ts";
+import { PROJECT_CONFIG_NAME } from "./project-config.ts";
 import type { Scope } from "./paths.ts";
 import type { Finding, Severity } from "./scan/index.ts";
+import { describeWaiting } from "./source/release-age.ts";
 import { shortId, type Labelled } from "./source/revision.ts";
 import type { UpdateVerdict } from "./source/upstream.ts";
 
@@ -16,7 +18,13 @@ export type ReportedSkip =
   | { kind: "declined" | "not-confirmed" | "not-selected" | "gone" | "disabled"; name: string }
   | { kind: "failed" | "unreachable"; name: string; error: string }
   | { kind: "pinned"; name: string; from: Labelled; to: Labelled }
+  | { kind: "waiting"; name: string; to: Labelled; age: number }
   | { kind: "rewritten"; name: string; pinnedAs: string; expected: Labelled; actual: Labelled };
+
+export interface SourceBlock {
+  name: string;
+  source: string;
+}
 
 export interface UpdateReport {
   scope: Scope;
@@ -24,6 +32,7 @@ export interface UpdateReport {
   blocked: ReportedChange[];
   skipped: ReportedSkip[];
   upToDate: string[];
+  sourceBlocked: SourceBlock[];
 }
 
 const SEVERITIES: [Severity, string][] = [
@@ -109,6 +118,8 @@ const reason = (skip: ReportedSkip): string => {
       return `write failed: ${code(skip.error)}`;
     case "unreachable":
       return `no upstream: ${code(skip.error)}`;
+    case "waiting":
+      return describeWaiting(revision(skip.to), skip.age);
     case "pinned":
       return `pinned at ${revision(skip.from)}, latest ${revision(skip.to)}`;
     case "rewritten":
@@ -119,23 +130,42 @@ const reason = (skip: ReportedSkip): string => {
 const section = (title: string, lines: string[]): string[] =>
   lines.length === 0 ? [] : [`### ${title}`, "", ...lines];
 
+const hasCritical = ({ findings }: ReportedChange): boolean =>
+  findings.some((finding) => finding.severity === "critical");
+
 const blockedIntro = ({ blocked, scope }: UpdateReport): string[] => {
   const names = blocked.map((change) => change.name).join(" ");
+  const command = code(`nik update ${names}${scopeFlag(scope)}`);
   return [
-    `Critical findings block these skills until someone approves them in a terminal: ${code(`nik update ${names}${scopeFlag(scope)}`)}.`,
+    blocked.every(hasCritical)
+      ? `Critical findings block these skills until someone approves them in a terminal: ${command}.`
+      : `Findings block these skills until someone approves them in a terminal: ${command}. ${code(PROJECT_CONFIG_NAME)} sets ${code("policy.denyWarn")}, so warn findings need approval too.`,
     "",
   ];
 };
 
+const renderBlocked = (report: UpdateReport): string[] =>
+  report.blocked.length === 0
+    ? []
+    : [...blockedIntro(report), ...report.blocked.flatMap(renderChange)];
+
+const renderSourceBlocked = ({ sourceBlocked }: UpdateReport): string[] =>
+  sourceBlocked.length === 0
+    ? []
+    : [
+        `The project policy blocks these skills. Remove them with ${code("nik remove")}, or allow their sources in ${code(PROJECT_CONFIG_NAME)}.`,
+        "",
+        ...sourceBlocked.map(
+          ({ name, source }) =>
+            `- ${code(name)}: source ${code(source)} is not allowed by ${code("policy.sources")} in ${code(PROJECT_CONFIG_NAME)}`,
+        ),
+        "",
+      ];
+
 export const renderUpdateReport = (report: UpdateReport): string => {
   const body = [
     ...section("Updated", report.updated.flatMap(renderChange)),
-    ...section(
-      "Needs a person",
-      report.blocked.length === 0
-        ? []
-        : [...blockedIntro(report), ...report.blocked.flatMap(renderChange)],
-    ),
+    ...section("Needs a person", [...renderBlocked(report), ...renderSourceBlocked(report)]),
     ...section("Not updated", [
       ...report.skipped.map((skip) => `- ${code(skip.name)}: ${reason(skip)}`),
       ...(report.skipped.length === 0 ? [] : [""]),

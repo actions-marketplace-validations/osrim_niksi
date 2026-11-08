@@ -13,6 +13,7 @@ const empty = (over: Partial<UpdateReport> = {}): UpdateReport => ({
   blocked: [],
   skipped: [],
   upToDate: [],
+  sourceBlocked: [],
   ...over,
 });
 
@@ -114,6 +115,7 @@ test("blocked skills ask for a person, and skipped skills give their reason", ()
         { kind: "declined", name: "declined" },
         { kind: "not-confirmed", name: "unconfirmed" },
         { kind: "not-selected", name: "later" },
+        { kind: "waiting", name: "fresh-tag", to: { tag: "v2.0.0", commit: NEW }, age: 86_400 },
         { kind: "failed", name: "broken", error: "disk full" },
         {
           kind: "pinned",
@@ -161,6 +163,7 @@ test("blocked skills ask for a person, and skipped skills give their reason", ()
       "- `declined`: declined at review",
       "- `unconfirmed`: write not confirmed",
       "- `later`: update available, not selected",
+      "- `fresh-tag`: `v2.0.0` (`bbbbbbbb`) available, 1 day old, waits for cooldown",
       "- `broken`: write failed: `disk full`",
       "- `pinned`: pinned at `v1.0.0` (`aaaaaaaa`), latest `bbbbbbbb`",
       "- `moved-tag`: pinned ref `v2` was rewritten from `aaaaaaaa` to `bbbbbbbb`",
@@ -171,6 +174,54 @@ test("blocked skills ask for a person, and skipped skills give their reason", ()
       "### Up to date",
       "",
       "`current`, `fresh`",
+      "",
+    ].join("\n"),
+  );
+});
+
+test("skills the project policy blocks need a person and name the rule", () => {
+  const markdown = renderUpdateReport(
+    empty({
+      blocked: [
+        {
+          name: "scripted",
+          from: { commit: OLD },
+          to: { commit: NEW },
+          stat: " SKILL.md | 1 +\n",
+          findings: [warnLink],
+        },
+      ],
+      sourceBlocked: [
+        { name: "evil", source: "https://github.com/evil/skills" },
+        { name: "odd", source: "https://git.example.com/`<b>`" },
+      ],
+    }),
+  );
+
+  expect(markdown).toBe(
+    [
+      "## nik update (project)",
+      "",
+      "### Needs a person",
+      "",
+      "Findings block these skills until someone approves them in a terminal: `nik update scripted`. `niksi.json` sets `policy.denyWarn`, so warn findings need approval too.",
+      "",
+      "#### `scripted`",
+      "",
+      "`aaaaaaaa` → `bbbbbbbb`",
+      "",
+      "```text",
+      " SKILL.md | 1 +",
+      "```",
+      "",
+      "Warn:",
+      "",
+      "- `prompt-injection` (asks the agent to hide actions) in `SKILL.md:7`: `do not tell the user`",
+      "",
+      "The project policy blocks these skills. Remove them with `nik remove`, or allow their sources in `niksi.json`.",
+      "",
+      "- `evil`: source `https://github.com/evil/skills` is not allowed by `policy.sources` in `niksi.json`",
+      "- `odd`: source `` https://git.example.com/`<b>` `` is not allowed by `policy.sources` in `niksi.json`",
       "",
     ].join("\n"),
   );

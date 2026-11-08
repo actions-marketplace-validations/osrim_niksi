@@ -9,6 +9,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -631,4 +632,249 @@ test("update keeps accepted rules while the content holds and records them for n
   expect(updated.exitCode).toBe(0);
   expect(await reviewOf("risky")).toBeUndefined();
   expect(await reviewOf("plain")).toEqual(accepted);
+});
+
+const DAY = 86_400;
+
+const setupCooldown = async (name: string, skills: string[]): Promise<UpdateFixture> => {
+  const fixture = await setupUpdate(name, skills, []);
+  for (const skill of skills) await makeSkill(fixture.repo, skill, "version three\n");
+  const released = Math.floor(Date.now() / 1000) - DAY;
+  const upstreamCommit = await commitAll(fixture.repo, "version three", released);
+  await tagHead(fixture.repo, "v2.0.0");
+  return { ...fixture, upstreamCommit };
+};
+
+const expectInstalled = async (
+  fixture: UpdateFixture,
+  name: string,
+  body: string,
+): Promise<void> => {
+  expect(await publishedSkill(fixture.project, name)).toContain(body);
+  await expectListMatchesLock(fixture.project, fixture.lockPath);
+};
+
+test("--all --yes keeps a skill whose new release is inside the cooldown, and the report lists it", async () => {
+  const fixture = await setupCooldown("cooldown-all", ["fresh"]);
+
+  const result = await runCli(fixture.project, "update", "--all", "--yes", "--report", "update.md");
+
+  expect(result.exitCode).toBe(0);
+  expect(await readSkills(fixture.lockPath)).toEqual(fixture.before);
+  await expectInstalled(fixture, "fresh", "version one");
+  expect(result.stdout).toContain("fresh: v2.0.0 available, 1 day old, waits for cooldown");
+  expect(result.stdout).toContain("Run nik update fresh to update it now.");
+  const report = await readFile(join(fixture.project, "update.md"), "utf8");
+  expect(report).toContain("- `fresh`: `v2.0.0` (");
+  expect(report).toContain(") available, 1 day old, waits for cooldown");
+});
+
+test("--all --yes takes a moved skill inside the cooldown and keeps the outdated one waiting", async () => {
+  const fixture = await setupUpdate("cooldown-moved", ["moved", "fresh"], []);
+  await makeSkill(fixture.repo, "fresh", "version three\n");
+  const upstreamCommit = await commitAll(
+    fixture.repo,
+    "version three",
+    Math.floor(Date.now() / 1000) - DAY,
+  );
+  await tagHead(fixture.repo, "v2.0.0");
+
+  const result = await runCli(fixture.project, "update", "--all", "--yes");
+
+  expect(result.exitCode).toBe(0);
+  const after = await readSkills(fixture.lockPath);
+  expect(after.moved?.commit).toBe(upstreamCommit);
+  expect(after.fresh).toEqual(fixture.before.fresh);
+  await expectInstalled(fixture, "fresh", "version one");
+  expect(await publishedSkill(fixture.project, "moved")).toContain("version one");
+  expect(result.stdout).toContain("fresh: v2.0.0 available, 1 day old, waits for cooldown");
+  expect(result.stdout).not.toContain("moved: v2.0.0 available");
+  expect(result.stdout).toContain("Updated 1 skill(s).");
+});
+
+test("naming a skill inside the cooldown updates it", async () => {
+  const fixture = await setupCooldown("cooldown-named", ["fresh"]);
+
+  const result = await runCli(fixture.project, "update", "fresh", "--yes");
+
+  expect(result.exitCode).toBe(0);
+  expect((await readSkills(fixture.lockPath)).fresh?.commit).toBe(fixture.upstreamCommit);
+  await expectInstalled(fixture, "fresh", "version three");
+});
+
+test("--min-release-age sets the cooldown in days", async () => {
+  const fixture = await setupCooldown("cooldown-flag", ["fresh"]);
+
+  const longer = await runCli(
+    fixture.project,
+    "update",
+    "--all",
+    "--yes",
+    "--min-release-age",
+    "2",
+  );
+  expect(longer.exitCode).toBe(0);
+  expect(await readSkills(fixture.lockPath)).toEqual(fixture.before);
+  await expectInstalled(fixture, "fresh", "version one");
+
+  const shorter = await runCli(
+    fixture.project,
+    "update",
+    "--all",
+    "--yes",
+    "--min-release-age",
+    "1",
+  );
+  expect(shorter.exitCode).toBe(0);
+  expect((await readSkills(fixture.lockPath)).fresh?.commit).toBe(fixture.upstreamCommit);
+  await expectInstalled(fixture, "fresh", "version three");
+});
+
+test("--min-release-age 0 updates a release from today", async () => {
+  const fixture = await setupCooldown("cooldown-off", ["fresh"]);
+
+  const result = await runCli(
+    fixture.project,
+    "update",
+    "--all",
+    "--yes",
+    "--min-release-age",
+    "0",
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect((await readSkills(fixture.lockPath)).fresh?.commit).toBe(fixture.upstreamCommit);
+  await expectInstalled(fixture, "fresh", "version three");
+});
+
+test("minimumReleaseAge in niksi.json sets the cooldown, and --min-release-age overrides it", async () => {
+  const fixture = await setupCooldown("cooldown-project", ["fresh"]);
+  await writeFile(join(fixture.project, "niksi.json"), '{"minimumReleaseAge":0}\n');
+
+  const flagged = await runCli(
+    fixture.project,
+    "update",
+    "--all",
+    "--yes",
+    "--min-release-age",
+    "2",
+  );
+  expect(flagged.exitCode).toBe(0);
+  expect(await readSkills(fixture.lockPath)).toEqual(fixture.before);
+  expect(await publishedSkill(fixture.project, "fresh")).toContain("version one");
+  await expectListMatchesLock(fixture.project, fixture.lockPath);
+
+  const unflagged = await runCli(fixture.project, "update", "--all", "--yes");
+  expect(unflagged.exitCode).toBe(0);
+  expect((await readSkills(fixture.lockPath)).fresh?.commit).toBe(fixture.upstreamCommit);
+  expect(await publishedSkill(fixture.project, "fresh")).toContain("version three");
+  await expectListMatchesLock(fixture.project, fixture.lockPath);
+});
+
+test("an invalid niksi.json exits 2 before update checks upstream", async () => {
+  const fixture = await setupCooldown("cooldown-project-invalid", ["fresh"]);
+  await writeFile(join(fixture.project, "niksi.json"), '{"minimumReleaseAge":"3"}\n');
+
+  const result = await runCli(
+    fixture.project,
+    "update",
+    "--all",
+    "--yes",
+    "--min-release-age",
+    "0",
+  );
+
+  expect(result.exitCode).toBe(2);
+  expect(result.stderr).toContain(`${join(fixture.project, "niksi.json")}: minimumReleaseAge`);
+  expect(await readSkills(fixture.lockPath)).toEqual(fixture.before);
+});
+
+test("--min-release-age without a whole number of days exits 2", async () => {
+  const fixture = await setupCooldown("cooldown-usage", ["fresh"]);
+
+  for (const value of ["soon", "1.5", ""]) {
+    const result = await runCli(fixture.project, "update", "--all", "--min-release-age", value);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("--min-release-age");
+  }
+  expect(await readSkills(fixture.lockPath)).toEqual(fixture.before);
+  await expectInstalled(fixture, "fresh", "version one");
+});
+
+test("the picker shows each candidate's age and the cooldown, and an unpicked skill waits", async () => {
+  const fixture = await setupCooldown("cooldown-picker", ["fresh"]);
+
+  const result = await runTerminal(
+    fixture.project,
+    [{ on: "Select skills to update", send: "\r" }],
+    "update",
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain(
+    "fresh: 1 new commit(s) (v1.0.0 → v2.0.0), 1 day old, waits for cooldown",
+  );
+  expect(result.stdout).toContain("fresh: v2.0.0 available, 1 day old, waits for cooldown");
+  expect(await readSkills(fixture.lockPath)).toEqual(fixture.before);
+  await expectInstalled(fixture, "fresh", "version one");
+});
+
+test("update skips a skill whose source niksi.json does not allow, updates the rest, and exits 3 when another skill fails", async () => {
+  const fixture = await setupUpdate("policy-source", ["allowed", "dropped"], ["allowed"]);
+  await rm(join(fixture.repo, "dropped"), { recursive: true });
+  const upstreamCommit = await commitAll(fixture.repo, "drop a skill");
+  await tagHead(fixture.repo, "v1.2.0");
+  const denied = join(tmp, "policy-source-denied");
+  await makeSkill(denied, "denied", "version one\n");
+  await initRepo(denied);
+  await commitAll(denied, "version one");
+  const deniedSource = pathToFileURL(denied).href;
+  const added = await runCli(fixture.project, "add", deniedSource, "--all", ...PATH_COPY, "--yes");
+  expect(added.exitCode).toBe(0);
+  const before = await readSkills(fixture.lockPath);
+  await writeFile(
+    join(fixture.project, "niksi.json"),
+    JSON.stringify({ policy: { sources: { git: [pathToFileURL(fixture.repo).href] } } }),
+  );
+  // A fetch of the denied source would now fail and report it as unreachable instead.
+  await rm(denied, { recursive: true, force: true });
+
+  const result = await runCli(fixture.project, "update", "--all", "--yes", "--report", "policy.md");
+
+  expect(result.exitCode).toBe(3);
+  const after = await readSkills(fixture.lockPath);
+  expect(after.allowed?.commit).toBe(upstreamCommit);
+  expect(after.dropped).toEqual(before.dropped);
+  expect(after.denied).toEqual(before.denied);
+  expect(await publishedSkill(fixture.project, "allowed")).toContain("version two");
+  expect(await publishedSkill(fixture.project, "denied")).toContain("version one");
+  const report = await readFile(join(fixture.project, "policy.md"), "utf8");
+  expect(report).toContain("### Needs a person");
+  expect(report).toContain(
+    `- \`denied\`: source \`${deniedSource}\` is not allowed by \`policy.sources\` in \`niksi.json\``,
+  );
+  expect(report).toContain("- `dropped`: no longer in the source");
+  expect(report).not.toContain("no upstream");
+});
+
+test("with denyWarn, update --yes refuses a skill with a warn finding and updates the rest", async () => {
+  const fixture = await setupUpdate("deny-warn-update", ["clean", "scripted"], ["clean"]);
+  await writeFile(join(fixture.repo, "scripted", "run.sh"), "echo hi\n");
+  await chmod(join(fixture.repo, "scripted", "run.sh"), 0o755);
+  const upstream = await commitAll(fixture.repo, "add a script");
+  await tagHead(fixture.repo, "v1.2.0");
+  await writeFile(join(fixture.project, "niksi.json"), '{"policy":{"denyWarn":true}}\n');
+
+  const result = await runCli(fixture.project, "update", "--all", "--yes", "--report", "warn.md");
+
+  expect(result.exitCode).toBe(3);
+  const after = await readSkills(fixture.lockPath);
+  expect(after.clean?.commit).toBe(upstream);
+  expect(after.scripted).toEqual(fixture.before.scripted);
+  expect(await publishedSkill(fixture.project, "clean")).toContain("version two");
+  expect(existsSync(join(fixture.project, "published", "scripted", "run.sh"))).toBe(false);
+  const report = await readFile(join(fixture.project, "warn.md"), "utf8");
+  expect(report).toContain(
+    "`niksi.json` sets `policy.denyWarn`, so warn findings need approval too.",
+  );
 });

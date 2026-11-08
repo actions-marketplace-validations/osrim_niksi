@@ -4,16 +4,16 @@ For contributors. Rules for what `niksi` prints and asks. User-facing behavior o
 
 ## Streams
 
-Human output goes to stdout inside a Clack frame. Runtime warnings, errors, and the update notice go to stderr. Security findings stay on stdout because they are part of the review. `list --json` and `audit --json` write only JSON to stdout.
+Human output goes to stdout inside a Clack frame. Runtime warnings, errors, and the update notice go to stderr. Security findings and the cooldown warning of `add` stay on stdout because they are part of the review. `list --json` and `audit --json` write only JSON to stdout.
 
 ## Prompts
 
 Every prompt has a flag replacement, and the replacements do not overlap:
 
 - `--all` selects skills. It never confirms a write.
-- `--yes` accepts ordinary confirmations and defaults. It never approves a critical finding.
-- `--dangerous-skip-critical-approval` skips critical approval for the current invocation. It keeps file lists and findings visible and does not accept warn findings or confirm a write.
-- In `add` and `update`, a critical finding needs a terminal unless `--dangerous-skip-critical-approval` is provided. Without either, the skill is skipped with exit `3`.
+- `--yes` accepts ordinary confirmations and defaults. It never approves a critical finding, or a warn finding when the project policy sets `denyWarn`.
+- `--dangerous-skip-critical-approval` skips critical approval for the current invocation. It keeps file lists and findings visible and does not accept warn findings or confirm a write. Under `denyWarn`, it skips the approval of warn findings too, since they gate as critical.
+- In `add` and `update`, a critical finding needs a terminal unless `--dangerous-skip-critical-approval` is provided. Without either, the skill is skipped with exit `3`. Under `denyWarn`, a warn finding gets the same critical question and the same exit.
 - An ordinary prompt with no terminal and no replacement flag exits `2` with a message that names the flag, except in `install`.
 
 Without a terminal, `install` keeps modified skills and installs the other entries, because restoring silently would destroy edits.
@@ -46,11 +46,12 @@ grilling: installed @ v1.2.0
 grilling: restored @ v1.2.0
 grilling: removed from custom-directory/grilling
 grilling: source no longer has skills/grilling
+grilling: v2.0.0 available, 1 day old, waits for cooldown
 ```
 
 A failed skill does not stop the batch. The command continues, writes state that matches disk, and exits `1`.
 
-No-op messages are `Nothing selected.`, `Nothing to add|copy|install|update.`, or `Nothing added.` after a declined warning.
+No-op messages are `Nothing selected.`, `Nothing to add|copy|install|update.`, or `Nothing added.` after a declined warning. When the project policy refuses an entry, `install` and `enable` end with `Nothing installed.` or `Nothing enabled.` and a remedy line. When it refuses the source, `add` ends with `Nothing added.` and a remedy line. `update` prints the refusal and its remedy as the skill's result line and continues.
 
 ## Color
 

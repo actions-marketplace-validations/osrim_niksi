@@ -391,3 +391,203 @@ test("add of owner/repo/<path> that discovery skips installs that skill rooted a
     restore();
   }
 });
+
+const freshSource = async (name: string): Promise<{ repo: string; commit: string }> => {
+  const repo = join(tmp, name);
+  await makeSkill(repo, "demo", "version one\n");
+  await initRepo(repo);
+  const commit = await commitAll(repo, "version one", Math.floor(Date.now() / 1000) - 86_400);
+  await tagHead(repo, "v2.0.0");
+  return { repo, commit };
+};
+
+const expectInstalledRelease = async (root: string, commit: string): Promise<void> => {
+  expect(await readFile(join(root, ".niksi", "skills", "demo", "SKILL.md"), "utf8")).toContain(
+    "version one",
+  );
+  expect(await readlink(join(root, ".claude", "skills", "demo"))).toBe("../../.niksi/skills/demo");
+  const { demo } = await readSkills(root);
+  expect(demo).toMatchObject({ commit });
+  expect(await listedRow(root)).toMatchObject({
+    ...demo,
+    name: "demo",
+    modified: false,
+    agents: ["claude"],
+  });
+};
+
+test("add installs a release inside the cooldown and warns with its age", async () => {
+  const root = await project("cooldown-add");
+  const { repo, commit } = await freshSource("cooldown-add-source");
+
+  const result = await runCli(
+    root,
+    "add",
+    pathToFileURL(repo).href,
+    "-p",
+    "--agent",
+    "claude",
+    "--yes",
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("v2.0.0 is 1 day old, inside the 3-day cooldown.");
+  expect((await readSkills(root)).demo).toMatchObject({ commit, track: "auto", tag: "v2.0.0" });
+  await expectInstalledRelease(root, commit);
+});
+
+test("add warns with the cooldown from niksi.json, and --min-release-age overrides it", async () => {
+  const { repo, commit } = await freshSource("project-cooldown-source");
+  const add = async (name: string, ...flags: string[]) => {
+    const root = await project(name);
+    await writeFile(join(root, "niksi.json"), '{"minimumReleaseAge":5}\n');
+    const result = await runCli(
+      root,
+      "add",
+      pathToFileURL(repo).href,
+      "-p",
+      "--agent",
+      "claude",
+      "--yes",
+      ...flags,
+    );
+    return { root, result };
+  };
+  const expectInstalled = async (root: string): Promise<void> => {
+    const link = join(root, ".claude", "skills", "demo");
+    expect(await isLink(link)).toBe(true);
+    expect(await readFile(join(link, "SKILL.md"), "utf8")).toContain("version one");
+    const { demo } = await readSkills(root);
+    expect(demo).toMatchObject({ commit, track: "auto", tag: "v2.0.0", agents: ["claude"] });
+    expect(await listedRow(root)).toMatchObject({ ...demo, name: "demo", links: [link] });
+  };
+
+  const longer = await add("project-cooldown");
+  const off = await add("project-cooldown-off", "--min-release-age", "0");
+
+  expect(longer.result.exitCode).toBe(0);
+  expect(longer.result.stdout).toContain("v2.0.0 is 1 day old, inside the 5-day cooldown.");
+  await expectInstalled(longer.root);
+  expect(off.result.exitCode).toBe(0);
+  expect(off.result.stdout).not.toContain("day cooldown");
+  await expectInstalled(off.root);
+});
+
+test("an invalid niksi.json stops add in project scope, and global scope ignores it", async () => {
+  const { repo } = await freshSource("invalid-project-config-source");
+  const root = await project("invalid-project-config");
+  await writeFile(join(root, "niksi.json"), '{"policy":{"source":{}}}\n');
+  const add = (scope: string) =>
+    runCli(root, "add", pathToFileURL(repo).href, scope, "--agent", "claude", "--yes");
+
+  const projectRun = await add("-p");
+  expect(projectRun.exitCode).toBe(2);
+  expect(projectRun.stderr).toContain(`${join(root, "niksi.json")}: unknown key policy.source`);
+  expect(existsSync(join(root, "niksi-lock.json"))).toBe(false);
+
+  const globalRun = await add("-g");
+  expect(globalRun.exitCode).toBe(0);
+  expect(globalRun.stdout).toContain("v2.0.0 is 1 day old, inside the 3-day cooldown.");
+});
+
+test("add does not warn with --min-release-age 0 or an explicit ref", async () => {
+  const { repo, commit } = await freshSource("quiet-release-source");
+  const offRoot = await project("cooldown-off");
+  const pinnedRoot = await project("cooldown-ref");
+  const off = await runCli(
+    offRoot,
+    "add",
+    pathToFileURL(repo).href,
+    "-p",
+    "--agent",
+    "claude",
+    "--yes",
+    "--min-release-age",
+    "0",
+  );
+  const pinned = await runCli(
+    pinnedRoot,
+    "add",
+    `${pathToFileURL(repo).href}@v2.0.0`,
+    "-p",
+    "--agent",
+    "claude",
+    "--yes",
+  );
+
+  for (const result of [off, pinned]) {
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain("day cooldown");
+  }
+  for (const root of [offRoot, pinnedRoot]) await expectInstalledRelease(root, commit);
+});
+
+const clonedRepos = (): Promise<string[]> =>
+  readdir(join(tmp, ".cache", "niksi", "repos")).catch(() => []);
+
+test("add exits 1 before it fetches a source that niksi.json does not allow", async () => {
+  const { repo } = await freshSource("policy-denied-add-source");
+  const root = await project("policy-denied-add");
+  await writeFile(join(root, "niksi.json"), '{"policy":{"sources":{"github":["osrim"]}}}\n');
+
+  const denied = await runCli(
+    root,
+    "add",
+    pathToFileURL(repo).href,
+    "-p",
+    "--agent",
+    "claude",
+    "--yes",
+  );
+
+  expect(denied.exitCode).toBe(1);
+  expect(existsSync(join(root, "niksi-lock.json"))).toBe(false);
+  expect(existsSync(join(root, ".niksi"))).toBe(false);
+  expect((await clonedRepos()).some((dir) => dir.includes("policy_denied_add_source"))).toBe(false);
+});
+
+test("add writes a skill from a source that niksi.json allows", async () => {
+  const { repo, commit } = await freshSource("policy-allowed-add-source");
+  const root = await project("policy-allowed-add");
+  const source = pathToFileURL(repo).href;
+  await writeFile(
+    join(root, "niksi.json"),
+    JSON.stringify({ policy: { sources: { git: [source] } } }),
+  );
+
+  const result = await runCli(root, "add", source, "-p", "--agent", "claude", "--yes");
+
+  expect(result.exitCode).toBe(0);
+  expect((await readSkills(root)).demo).toMatchObject({ source, commit });
+  expect(await readFile(join(root, ".claude", "skills", "demo", "SKILL.md"), "utf8")).toContain(
+    "version one",
+  );
+});
+
+const warnSource = async (name: string): Promise<string> => {
+  const repo = join(tmp, name);
+  await makeSkill(repo, "scripted");
+  await writeFile(join(repo, "scripted", "run.sh"), "echo hi\n", { mode: 0o755 });
+  await initRepo(repo);
+  await commitAll(repo, "scripted");
+  return pathToFileURL(repo).href;
+};
+
+test("with denyWarn, add --yes refuses a skill with a warn finding and exits 3", async () => {
+  const source = await warnSource("deny-warn-add-source");
+  const add = async (name: string, config: string) => {
+    const root = await project(name);
+    await writeFile(join(root, "niksi.json"), config);
+    return { root, result: await runCli(root, "add", source, "-p", "--agent", "claude", "--yes") };
+  };
+
+  const denied = await add("deny-warn-add", '{"policy":{"denyWarn":true}}');
+  const allowed = await add("deny-warn-off-add", '{"policy":{"denyWarn":false}}');
+
+  expect(denied.result.exitCode).toBe(3);
+  expect(existsSync(join(denied.root, "niksi-lock.json"))).toBe(false);
+  expect(await isLink(join(denied.root, ".claude", "skills", "scripted"))).toBe(false);
+  expect(allowed.result.exitCode).toBe(0);
+  expect(Object.keys(await readSkills(allowed.root))).toEqual(["scripted"]);
+  expect(existsSync(join(allowed.root, ".claude", "skills", "scripted", "run.sh"))).toBe(true);
+});

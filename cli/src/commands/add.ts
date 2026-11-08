@@ -7,6 +7,8 @@ import type { DiscoveredSkill } from "../core/source/discover.ts";
 import { loadLock, type Lockfile } from "../core/install/lockfile.ts";
 import type { AgentId } from "../core/install/agents.ts";
 import type { Scope } from "../core/paths.ts";
+import { sourceViolation } from "../core/policy.ts";
+import { PROJECT_CONFIG_NAME, readProjectConfig } from "../core/project-config.ts";
 import {
   COMMIT_HASH,
   displayLabel,
@@ -14,6 +16,12 @@ import {
   type Revision,
 } from "../core/source/revision.ts";
 import type { ScopeOptions } from "../core/install/scope.ts";
+import {
+  describeAge,
+  minReleaseAge,
+  unixNow,
+  waitsForCooldown,
+} from "../core/source/release-age.ts";
 import {
   insideProject,
   resolveCoordinate,
@@ -31,7 +39,7 @@ import type { CommandHelp } from "../ui/help.ts";
 import { migrateIfLegacy } from "../ui/migrate.ts";
 import { pickSkillsToAdd, type Extension } from "../ui/pick.ts";
 import { createSpinner, fail } from "../ui/prompt.ts";
-import { logWarn } from "../ui/report.ts";
+import { logError, logWarn, warn } from "../ui/report.ts";
 import { reviewNewSkills, type ReviewedSkill } from "../ui/review.ts";
 import { skillName, tildify } from "../ui/style.ts";
 import {
@@ -68,6 +76,7 @@ interface AddOptions extends ScopeOptions, ReviewOptions {
   agent?: string | string[];
   copy?: boolean;
   path?: string;
+  minReleaseAge?: unknown;
 }
 
 const MODES = {
@@ -104,15 +113,16 @@ export const run = async (
   if (parsed.skill) names = [parsed.skill, ...names];
 
   const source = sourceForCoordinate(parsed);
+  await migrateIfLegacy(options.global ? "global" : "project");
+  const scope = await chooseAddScope(options, mode.where);
+  const { minimumReleaseAge, policy } = await readProjectConfig(scope);
+  refuseSource(sourceViolation(policy, source.id));
   const fetched = await resolveSource(source, parsed);
   if (!fetched) return;
   const { rev } = fetched;
 
-  await migrateIfLegacy(options.global ? "global" : "project");
-  const { scope, agents, copyPath } = await chooseDestination(options, {
-    where: mode.where,
-    mode: mode.verb,
-  });
+  const { agents, copyPath } = await chooseDestination(options, scope, mode.verb);
+  await warnInsideCooldown(source, rev, minReleaseAge(options.minReleaseAge, minimumReleaseAge));
   if (!(await confirmOutsideProject(parsed, coordinate, scope, options))) {
     p.outro("Nothing added.");
     return;
@@ -149,7 +159,7 @@ export const run = async (
           other: await readOtherScopeLock(scope),
           scope,
           agents,
-          options,
+          options: { ...options, denyWarn: policy?.denyWarn },
         })
       : { approved: [] };
   if (approved.length === 0 && picked.extend.length === 0) {
@@ -202,32 +212,42 @@ const parseCoordinateOrFail = (raw: string): Coordinate => {
   }
 };
 
+const chooseAddScope = (options: AddOptions, where: string): Promise<Scope> => {
+  if (options.path === undefined) return chooseScope(options, where);
+  if (!options.copy) throw usageError("Pass --copy with --path.");
+  if (options.global) throw usageError("Do not combine --path with --global.");
+  if (options.agent !== undefined) throw usageError("Do not combine --path with --agent.");
+  return Promise.resolve("project");
+};
+
+const refuseSource = (reason: string | undefined): void => {
+  if (reason === undefined) return;
+  logError(reason);
+  fail(`Nothing added.\nAllow the source in ${PROJECT_CONFIG_NAME} to add skills from it.`);
+};
+
 interface Destination {
-  scope: Scope;
   agents: AgentId[];
   copyPath: string | undefined;
 }
 
 const chooseDestination = async (
   options: AddOptions,
-  prompts: { where: string; mode: Mode },
+  scope: Scope,
+  mode: Mode,
 ): Promise<Destination> => {
   if (options.path !== undefined) {
-    if (!options.copy) throw usageError("Pass --copy with --path.");
-    if (options.global) throw usageError("Do not combine --path with --global.");
-    if (options.agent !== undefined) throw usageError("Do not combine --path with --agent.");
     try {
-      return { scope: "project", agents: [], copyPath: await normalizeCopyPath(options.path) };
+      return { agents: [], copyPath: await normalizeCopyPath(options.path) };
     } catch (e) {
       throw usageError((e as Error).message);
     }
   }
-  const scope = await chooseScope(options, prompts.where);
-  const agents = await chooseAgents(options, scope, prompts.mode);
+  const agents = await chooseAgents(options, scope, mode);
   for (const agent of agents) {
     await assertSkillsDirSafe(scope, agent).catch((e: Error) => fail(e.message));
   }
-  return { scope, agents, copyPath: undefined };
+  return { agents, copyPath: undefined };
 };
 
 const confirmOutsideProject = (
@@ -256,6 +276,15 @@ const confirmOutsideProject = (
 
 const shownLabel = (userRef: string | undefined, entry: Labelled): string =>
   userRef && !COMMIT_HASH.test(userRef) ? userRef : displayLabel(entry);
+
+const warnInsideCooldown = async (source: Source, rev: Revision, days: number): Promise<void> => {
+  if (rev.track !== "auto") return;
+  const committedAt = await source.committedAt(rev);
+  if (committedAt === undefined) return;
+  const age = unixNow() - committedAt;
+  if (!waitsForCooldown(age, days)) return;
+  warn(`${displayLabel(rev)} is ${describeAge(age)}, inside the ${days}-day cooldown.`);
+};
 
 interface Fetched {
   rev: Revision;

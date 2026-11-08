@@ -15,8 +15,10 @@ Three commands scan:
 | severity | effect |
 | --- | --- |
 | `critical` | Needs approval in a terminal unless `--dangerous-skip-critical-approval` is set. `--yes` cannot approve it. Without a terminal or the dangerous flag, the skill is skipped and the command exits `3`. |
-| `warn` | Pauses once per skill. `--yes` skips the pause. |
+| `warn` | Pauses once per skill. `--yes` skips the pause. Under `policy.denyWarn`, it gates like `critical`. |
 | `info` | Never pauses. |
+
+When a project's `niksi.json` sets `policy.denyWarn` to `true`, `add` and `update` gate a warn finding the same way as a critical one: it needs approval in a terminal, `--yes` doesn't accept it, and without a terminal the skill is skipped and the command exits `3`. `--dangerous-skip-critical-approval` skips that approval too. The lockfile records only critical rules as accepted, so an approved warn finding leaves no record. `audit` ignores `denyWarn`. See [Project configuration](configuration.md#project-configuration).
 
 A skill you decline is skipped. The other skills in the batch still install.
 
@@ -30,7 +32,7 @@ Each finding also has a confidence: `high`, `medium`, or `low`. Severity says ho
 
 A `critical` finding with `low` confidence shows and gates as `warn`, so `--yes` accepts it. The gate, `nik audit`, and `nik update --report` mark it `(low confidence)`. `nik audit --json` gives every finding a `confidence` field.
 
-`add` and `update` accept `--dangerous-skip-critical-approval` in interactive and non-interactive runs. It skips only critical approval for that invocation. The gate still lists every file, runs the scan, and prints every finding with its original severity. Warn finding review and the final write confirmation still use `--yes`. The flag is never remembered. The rule ids of the critical findings it skipped are recorded in the lockfile entry as accepted, for that content only, so review them in the lockfile diff.
+`add` and `update` accept `--dangerous-skip-critical-approval` in interactive and non-interactive runs. It skips only critical approval for that invocation. The gate still lists every file, runs the scan, and prints every finding with its original severity. Warn finding review and the final write confirmation still use `--yes`, except under `policy.denyWarn` (see [Severities](#severities)). The flag is never remembered. The rule ids of the critical findings it skipped are recorded in the lockfile entry as accepted, for that content only, so review them in the lockfile diff.
 
 An approval covers one source, path, integrity, and scope. Adding approved content to another agent does not reopen the review. `nik audit` reports a critical finding that an approval accepted, and the finding does not change its exit code.
 
@@ -464,3 +466,5 @@ Every finding masks secret values. URL passwords, query values for keys such as 
 ## Limits
 
 The scan matches known patterns. It does not run the skill, follow URLs, or understand intent. The `prompt-injection`, `credential-disclosure`, and `money-movement` rules match wording, not intent: a paraphrase passes, and a safe sentence with the same words can match. A skill can be harmful and pass with no findings, and a safe skill can trigger a `warn`. Choose `Read files…` and read the files before you approve them.
+
+The [cooldown](commands.md#cooldown) is not part of the scan. It reads an upstream revision's age from the Git committer date, which whoever pushes the commit sets. A commit dated in the past passes the cooldown at once. `niksi` does not ask the Git host when a tag was published, because that would need API calls and a token.

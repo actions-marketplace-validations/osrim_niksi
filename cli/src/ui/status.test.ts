@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { sourceFor } from "../core/source/index.ts";
 import type { Revision } from "../core/source/revision.ts";
 import type { UpdatableVerdict, UpdateVerdict } from "../core/source/upstream.ts";
@@ -7,7 +7,10 @@ import {
   describeUpdate,
   friendlySource,
   groupLabel,
+  logSourceBlocked,
   reportVerdicts,
+  refuseViolations,
+  reportWaiting,
   revisionRange,
 } from "./status.ts";
 
@@ -41,6 +44,19 @@ describe("describeUpdate", () => {
     expect(describeUpdate(verdict("outdated"))).toBe("2 new commit(s) (aaaaaaaa → bbbbbbbb)");
   });
 
+  test("a candidate with a known age names it", () => {
+    expect(describeUpdate({ ...verdict("outdated"), age: 5 * 86_400 })).toBe(
+      "2 new commit(s) (aaaaaaaa → bbbbbbbb), 5 days old",
+    );
+    expect(describeUpdate({ ...verdict("moved"), age: 7200 })).toBe("no file changes, 2 hours old");
+  });
+
+  test("a waiting candidate says it waits for the cooldown", () => {
+    expect(describeUpdate({ kind: "outdated", ...base(), age: 86_400, waiting: true })).toBe(
+      "2 new commit(s) (aaaaaaaa → bbbbbbbb), 1 day old, waits for cooldown",
+    );
+  });
+
   test("an outdated skill without new commits says its content changed", () => {
     expect(describeUpdate({ ...verdict("outdated"), ahead: 0 })).toBe(
       "content changed (aaaaaaaa → bbbbbbbb)",
@@ -67,6 +83,31 @@ describe("revisionRange", () => {
         ahead: 0,
       }),
     ).toBe("");
+  });
+});
+
+describe("reportWaiting", () => {
+  let output: CapturedOutput;
+
+  beforeEach(() => {
+    output = captureOutput();
+  });
+
+  afterEach(() => {
+    output.restore();
+  });
+
+  test("names the upstream revision, its age, and how to update now", () => {
+    const waiting: UpdatableVerdict = {
+      kind: "outdated",
+      ...base("tdd", { tag: "v1.0.0" }, { tag: "v2.0.0" }),
+      age: 86_400,
+      waiting: true,
+    };
+    reportWaiting(waiting, "global");
+    expect(output.text()).toContain(
+      "tdd: v2.0.0 available, 1 day old, waits for cooldown\n│  Run nik update tdd -g to update it now.",
+    );
   });
 });
 
@@ -182,4 +223,79 @@ describe("reportVerdicts", () => {
       expect(process.exitCode).toBe(named);
     },
   );
+});
+
+describe("refuseViolations", () => {
+  let output: CapturedOutput;
+
+  beforeEach(() => {
+    output = captureOutput();
+  });
+
+  afterEach(() => {
+    output.restore();
+  });
+
+  test("names each entry and its refused source, then exits 1", () => {
+    const exit = spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("exit");
+    }) as typeof process.exit);
+    try {
+      expect(() =>
+        refuseViolations(
+          [
+            {
+              name: "grilling",
+              reason:
+                "source https://github.com/evil/skills is not allowed by policy.sources in niksi.json",
+            },
+            {
+              name: "tdd",
+              reason:
+                "source git@gitlab.com:acme/skills.git is not allowed by policy.sources in niksi.json",
+            },
+          ],
+          "Nothing installed.",
+        ),
+      ).toThrow("exit");
+      expect(exit).toHaveBeenCalledWith(1);
+    } finally {
+      exit.mockRestore();
+    }
+
+    const text = output.text();
+    expect(text).toContain(
+      "grilling: source https://github.com/evil/skills is not allowed by policy.sources in niksi.json",
+    );
+    expect(text).toContain(
+      "tdd: source git@gitlab.com:acme/skills.git is not allowed by policy.sources in niksi.json",
+    );
+    expect(text).toContain(
+      "Nothing installed.\n│  Remove these skills with `nik remove`, or allow their sources in niksi.json.",
+    );
+  });
+
+  test("no violations print nothing and continue", () => {
+    refuseViolations([], "Nothing installed.");
+    expect(output.text()).toBe("");
+  });
+});
+
+describe("logSourceBlocked", () => {
+  test("names the skill, the rule, and the remedy, and keeps the batch going", () => {
+    const output = captureOutput();
+    try {
+      logSourceBlocked({
+        name: "evil",
+        reason:
+          "source https://github.com/evil/skills is not allowed by policy.sources in niksi.json",
+      });
+    } finally {
+      output.restore();
+    }
+
+    expect(output.text()).toContain(
+      "evil: source https://github.com/evil/skills is not allowed by policy.sources in niksi.json\n│  Remove it with `nik remove evil`, or allow its source in niksi.json.",
+    );
+  });
 });
