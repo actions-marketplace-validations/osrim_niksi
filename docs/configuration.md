@@ -127,46 +127,7 @@ The store is a download cache. A lockfile entry installs without the network whe
 
 `niksi-lock.json` records every installed skill in a scope. `nik install` recreates the installation from it.
 
-```json
-{
-  "lockfileVersion": 1,
-  "skills": {
-    "pdf": {
-      "source": "https://github.com/anthropics/skills",
-      "branch": "main",
-      "path": "skills/pdf",
-      "commit": "474e3e791559398762c4f5eff1399efe8f402156",
-      "integrity": "sha256-Y7e8N/hx+rfGdAq0eQxb/7nXc6OLzBdbqVICpPivokY=",
-      "track": "auto",
-      "copy": true,
-      "copyPath": "custom-directory"
-    }
-  }
-}
-```
-
-| field | meaning |
-| --- | --- |
-| `source` | `https://`, `ssh://`, or `file://` URL or `user@host:path` address of the source, or `local:` followed by its path. In project scope, a local directory inside the project root is recorded as `local:.`, the project root. A local directory outside it, a symlink to one, or any local directory in global scope is recorded as `local:/`, the filesystem root. Other machines cannot resolve such a path, so in project scope `add` asks first. Entries recorded under the typed directory, such as `local:./skills/demo`, keep working. |
-| `path` | Skill directory inside the source. For a local source it is the same whichever directory you typed: `nik add ./skills/demo` and `nik add ./skills demo` both record `skills/demo`. |
-| `root` | Discovery root: the directory of a forge URL such as `https://github.com/o/r/tree/main/plugins/x`, or the local directory you typed. Absent when `add` searches the whole source. Use a relative path with forward slashes and no empty, `.` or `..` segments. Absolute POSIX and Windows paths and backslashes are rejected. `update` checks dependencies within this directory. |
-| `integrity` | sha256 of the installed skill files. `install` verifies every file against it. |
-| `track` | `auto` follows the latest stable tag or the branch. `pin` stays at the ref you typed. |
-| `commit` | Installed commit, as 40 or 64 lowercase hex characters. Absent for local sources. |
-| `branch` | Default branch of the source, or the branch you pinned. Absent for local sources. |
-| `tag` | Installed tag. |
-| `pinnedAs` | The ref you typed after `@`, when it is not a branch or commit. |
-| `copy` | `true` when the skill was added with `--copy`. |
-| `agents` | Agents that received an agent copy. Link and path-copy entries do not record agents. |
-| `copyPath` | Normalized project-relative destination root for a path copy. |
-| `disabled` | `true` after `nik disable`. Absent means enabled. The entry keeps its placement. `install` and `update` skip it until `nik enable` clears it. |
-
-A copy entry has exactly one placement: a non-empty `agents` array or `copyPath`. Link entries have neither. `disabled` does not depend on placement. It is the last key. Lockfile version 1 remains in use.
-
-Releases without path-copy support reject path-copy entries because they have
-`copy: true` but no `agents`. Without disable support, releases drop `disabled`
-and install the entry. Without discovery-root support, releases drop `root`
-and check dependencies across the whole source.
+Each entry records the skill's source, path, revision, integrity, and placement, what its review accepted, and whether it is disabled. [lockfile.md](lockfile.md) defines every field, how the integrity is computed, and how lockfile versions change, with a complete example.
 
 ## Environment variables
 
