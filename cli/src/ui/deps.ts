@@ -16,13 +16,13 @@ import { discoveryCoordinate, type Changes, type DiscoveryLocation } from "../co
 import type { Revision } from "../core/source/revision.ts";
 import type { OutdatedVerdict } from "../core/source/upstream.ts";
 import { withSpinner } from "./prompt.ts";
-import { logWarn, warn } from "./report.ts";
-import { dim, skillName } from "./style.ts";
+import { logWarn } from "./report.ts";
+import { dim, escapeLine, skillName } from "./style.ts";
 
 export const warnMentions = (missing: MissingDep[], note: string): void => {
   for (const dep of missing) {
-    warn(
-      `${skillName(dep.from)} mentions ${skillName(dep.name)} at ${dep.file}:${dep.line}. ${note}.`,
+    logWarn(
+      `${skillName(dep.from)} mentions ${skillName(dep.name)} at ${escapeLine(dep.file)}:${dep.line}. ${note}.`,
     );
   }
 };
@@ -46,7 +46,7 @@ export const warnReferrers = async (
   );
   const known = targets.map((name) => survivors.find((skill) => skill.name === name) ?? { name });
   for (const [target, referrers] of referrersTo(batch, known)) {
-    warn(`${skillName(target)} is referenced by ${referrers.map(skillName).join(", ")}`);
+    logWarn(`${skillName(target)} is referenced by ${referrers.map(skillName).join(", ")}`);
   }
 };
 
@@ -59,12 +59,16 @@ export const reportNotInstalled = (
   warnMentions(missing, "not installed");
   const coordinate = discoveryCoordinate(discovered);
   if (coordinate === undefined) {
-    warn("Cannot generate a rooted add command without a source revision.");
+    logWarn("Cannot suggest an add command for this source.");
     return;
   }
   const selectors = missing.map((dep) =>
     dep.path === undefined ? dep.name : pathInRoot(discovered.root, dep.path),
   );
+  if (selectors.some((selector) => escapeLine(selector) !== selector)) {
+    logWarn("Cannot generate an add command: a dependency name or path holds control characters.");
+    return;
+  }
   const at = ref === undefined ? "" : `@${ref}`;
   p.log.info(
     `Add them: ${dim(`nik add ${coordinate}${at} ${selectors.join(" ")}${scopeFlag(scope)}`)}`,
@@ -179,12 +183,17 @@ const reportGroupHints = (
   mentionedByAuto: Set<string>,
   scope: Scope,
 ): void => {
-  const location = group[0]!.verdict.skill;
   const atLatest = missing.filter((dep) => mentionedByAuto.has(dep.name));
   const atReviewed = missing.filter((dep) => !mentionedByAuto.has(dep.name));
-  if (atLatest.length > 0) reportNotInstalled(atLatest, location, scope);
+  if (atLatest.length > 0) {
+    const followed = group.find((item) => item.verdict.skill.track !== "pin")!.verdict.skill;
+    reportNotInstalled(atLatest, followed, scope);
+  }
   if (atReviewed.length > 0) {
-    const { upstream } = group.find((item) => item.verdict.skill.track === "pin")!.verdict;
-    reportNotInstalled(atReviewed, location, scope, pinnedRef(upstream));
+    const { skill, upstream } = group.find((item) => item.verdict.skill.track === "pin")!.verdict;
+    // The tree URL names the reviewed ref too, so it still resolves after the recorded ref is gone.
+    const ref = pinnedRef(upstream);
+    const reviewed = ref === undefined ? skill : { ...skill, pinnedAs: ref };
+    reportNotInstalled(atReviewed, reviewed, scope, ref);
   }
 };

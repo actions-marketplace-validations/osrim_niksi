@@ -1,6 +1,5 @@
 import * as p from "@clack/prompts";
 import type { AgentId } from "../core/install/agents.ts";
-import { assertSkillsDirSafe } from "../core/install/link.ts";
 import type { Scope } from "../core/paths.ts";
 import { loadLock, splitDisabled, type Lockfile } from "../core/install/lockfile.ts";
 import { policyViolations } from "../core/policy.ts";
@@ -16,11 +15,10 @@ import { resolveScope, type ScopeOptions } from "../core/install/scope.ts";
 import { land, reportRestoreError, restoreSkill } from "../ui/flow.ts";
 import type { CommandHelp } from "../ui/help.ts";
 import { fail, isInteractive, unwrap } from "../ui/prompt.ts";
-import { migrateIfLegacy } from "../ui/migrate.ts";
-import { warn } from "../ui/report.ts";
+import { logWarn } from "../ui/report.ts";
 import { refuseViolations, reportDisabled, reportModified } from "../ui/status.ts";
 import { skillName, tildify } from "../ui/style.ts";
-import { chooseAgents, needsAgents, warnLinkCollisions } from "../ui/destination.ts";
+import { checkAgentFlag, restoreAgents, warnLinkCollisions } from "../ui/destination.ts";
 
 export const help: CommandHelp = {
   description: "Restore every skill in niksi-lock.json. Modified files need confirmation.",
@@ -32,8 +30,6 @@ export const help: CommandHelp = {
   ],
 };
 
-const AGENT_IGNORED = "Ignoring --agent. Every lockfile entry records its destination.";
-
 interface InstallOptions extends ScopeOptions {
   yes?: boolean;
   agent?: string | string[];
@@ -41,10 +37,10 @@ interface InstallOptions extends ScopeOptions {
 }
 
 export const run = async (options: InstallOptions): Promise<void> => {
+  checkAgentFlag(options.agent);
   p.intro("nik install");
-  const scope = resolveScope(options, p.log.warn) ?? "project";
+  const scope = resolveScope(options, logWarn) ?? "project";
   const { policy } = await readProjectConfig(scope);
-  await migrateIfLegacy(scope);
   const { enabled, disabled } = splitDisabled(await readInstallLock(scope, options.frozenLockfile));
   const skills = installedSkills(enabled);
   refuseViolations(policyViolations(policy, skills), "Nothing installed.");
@@ -55,12 +51,7 @@ export const run = async (options: InstallOptions): Promise<void> => {
     p.outro("Nothing to install.");
     return;
   }
-  const agentsNeeded = needsAgents(skills);
-  if (!agentsNeeded && options.agent !== undefined) warn(AGENT_IGNORED);
-  const agents = agentsNeeded ? await chooseAgents(options, scope) : [];
-  for (const agent of agents) {
-    await assertSkillsDirSafe(scope, agent).catch((e: Error) => fail(e.message));
-  }
+  const agents = await restoreAgents(skills, options, scope);
   warnLinkCollisions(skills, scope, agents);
 
   const modified = await modifiedSkills(skills, scope);

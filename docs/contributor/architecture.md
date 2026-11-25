@@ -27,7 +27,7 @@ cli/src/
   test-color.ts      fresh-process probe for color output, tests only
   test-timing.ts     slowdown against a same-size linear baseline, tests only
   commands/          add, adopt, install, update, remove, list, audit, disable, enable, prune, completion, scan-source
-  ui/                prompts, review, gate, decisions, pager, reports, help, status, destination choices, legacy migration notice
+  ui/                prompts, review, gate, decisions, pager, reports, help, status, destination choices
   core/
     completion/      completion spec from the registered commands, bash, zsh, and fish scripts, skill names for the helper
     config.ts        remembered scope and agent choices
@@ -42,7 +42,7 @@ cli/src/
     source/          coordinates, Git and local sources, revisions, upstream, release age, provenance hints, content match
     skill/           files, frontmatter, integrity, dependency mentions, Markdown map
     scan/            scan rules, findings, and per-rule fixtures
-    install/         scope, agents, store, target checks, links, path copies, replacement, destination, lockfile, unmanaged skills, adoption, ski layout migration
+    install/         scope, agents, store, target checks, links, path copies, replacement, destination, lockfile, unmanaged skills, adoption
 ```
 
 `core/source/` and `core/install/` are siblings. Runtime imports point from `install/` to `source/` only. Source adapters may type-import installed skill data. Commands and UI combine the two.
@@ -117,7 +117,9 @@ When the other scope satisfies a dependency, the report names that scope. An
 unreadable lockfile in the other scope prints a warning, and the check ignores
 that scope. A declined or blocked dependency does not remove its approved parent.
 Dependencies are offered only in a terminal without `yes`. Otherwise they are
-reported with the `nik add` command that adds them.
+reported with the `nik add` command that adds them. When `discoveryCoordinate`
+cannot build a coordinate for the discovery root, the report prints a warning
+instead of the command.
 
 Review questions and dependency offers go through a `Decisions` object from `ui/decisions.ts`. `clackDecisions` asks with Clack. Tests pass scripted decisions. Whether to ask, and what an answer means, stays in the gate and the review module.
 

@@ -3,8 +3,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import * as find from "empathic/find";
 
-export const LOCKFILE_NAME = "niksi-lock.json";
-export const LEGACY_LOCKFILE_NAME = "ski-lock.json";
+const LOCKFILE_NAME = "niksi-lock.json";
 
 export type Scope = "global" | "project";
 
@@ -62,7 +61,6 @@ export const canonicalDir = (scope: Scope): string =>
 
 const ROOT_MARKERS = [
   LOCKFILE_NAME,
-  LEGACY_LOCKFILE_NAME, // ponytail: finds unmigrated ski projects. Delete in 0.5.0.
   ".agents",
   ".claude",
   ".opencode",

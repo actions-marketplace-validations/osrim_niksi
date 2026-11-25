@@ -1,6 +1,5 @@
 import * as p from "@clack/prompts";
 import { applySkill, type Applied } from "../core/install/apply.ts";
-import { assertSkillsDirSafe } from "../core/install/link.ts";
 import { addDestination } from "../core/install/destination.ts";
 import { normalizeCopyPath } from "../core/install/path-copy.ts";
 import type { DiscoveredSkill } from "../core/source/discover.ts";
@@ -36,15 +35,15 @@ import { readOtherScopeLock } from "../ui/deps.ts";
 import { confirm, land } from "../ui/flow.ts";
 import { confirmWrite, type ReviewOptions } from "../ui/gate.ts";
 import type { CommandHelp } from "../ui/help.ts";
-import { migrateIfLegacy } from "../ui/migrate.ts";
 import { pickSkillsToAdd, type Extension } from "../ui/pick.ts";
 import { createSpinner, fail } from "../ui/prompt.ts";
-import { logError, logWarn, warn } from "../ui/report.ts";
+import { logError, logWarn, reviewWarn } from "../ui/report.ts";
 import { reviewNewSkills, type ReviewedSkill } from "../ui/review.ts";
 import { skillName, tildify } from "../ui/style.ts";
 import {
   chooseAgents,
   chooseScope,
+  refuseUnsafeSkillsDirs,
   warnAncestorCollisions,
   warnScopeCollisions,
   type Mode,
@@ -113,7 +112,6 @@ export const run = async (
   if (parsed.skill) names = [parsed.skill, ...names];
 
   const source = sourceForCoordinate(parsed);
-  await migrateIfLegacy(options.global ? "global" : "project");
   const scope = await chooseAddScope(options, mode.where);
   const { minimumReleaseAge, policy } = await readProjectConfig(scope);
   refuseSource(sourceViolation(policy, source.id));
@@ -127,7 +125,6 @@ export const run = async (
     p.outro("Nothing added.");
     return;
   }
-  await migrateIfLegacy(scope);
   const { source: scopedSource, skills, root } = scopeCoordinate(source, scope, fetched);
 
   const loaded = await loadLock(scope);
@@ -244,9 +241,7 @@ const chooseDestination = async (
     }
   }
   const agents = await chooseAgents(options, scope, mode);
-  for (const agent of agents) {
-    await assertSkillsDirSafe(scope, agent).catch((e: Error) => fail(e.message));
-  }
+  await refuseUnsafeSkillsDirs(scope, agents);
   return { agents, copyPath: undefined };
 };
 
@@ -283,7 +278,7 @@ const warnInsideCooldown = async (source: Source, rev: Revision, days: number): 
   if (committedAt === undefined) return;
   const age = unixNow() - committedAt;
   if (!waitsForCooldown(age, days)) return;
-  warn(`${displayLabel(rev)} is ${describeAge(age)}, inside the ${days}-day cooldown.`);
+  reviewWarn(`${displayLabel(rev)} is ${describeAge(age)}, inside the ${days}-day cooldown.`);
 };
 
 interface Fetched {

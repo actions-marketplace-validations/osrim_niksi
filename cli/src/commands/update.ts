@@ -3,6 +3,7 @@ import { stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { applySkill, type Applied, type Destination } from "../core/install/apply.ts";
 import {
+  filterLock,
   loadLock,
   splitDisabled,
   type LoadedLockfile,
@@ -15,7 +16,6 @@ import {
   updateDestination,
   type InstalledSkill,
 } from "../core/install/destination.ts";
-import { legacyLayoutPresent } from "../core/install/migrate.ts";
 import { tildify, type Scope } from "../core/paths.ts";
 import { CRITICAL_EXIT, criticalRules, type Finding } from "../core/scan/index.ts";
 import { integrityOf } from "../core/skill/integrity.ts";
@@ -51,11 +51,10 @@ import { readOtherScopeLock, reportUpdateDeps, type UpdatedFiles } from "../ui/d
 import { land } from "../ui/flow.ts";
 import { confirmWrite, reviewSkills, type ReviewOptions } from "../ui/gate.ts";
 import type { CommandHelp } from "../ui/help.ts";
-import { migrateIfLegacy } from "../ui/migrate.ts";
-import { colorStat, escapeControl } from "../ui/pager.ts";
+import { colorStat } from "../ui/pager.ts";
 import { pickUpdates } from "../ui/pick.ts";
 import { fail, withSpinner } from "../ui/prompt.ts";
-import { logError, logSkillError, logSourceCaution, logWarn, warn } from "../ui/report.ts";
+import { logError, logSkillError, logSourceCaution, logWarn } from "../ui/report.ts";
 import {
   describeUpdate,
   emptyScopeMessage,
@@ -66,7 +65,7 @@ import {
   reportWaiting,
   revisionRange,
 } from "../ui/status.ts";
-import { dim, skillName } from "../ui/style.ts";
+import { dim, escapeControl, skillName } from "../ui/style.ts";
 
 export const help: CommandHelp = {
   description:
@@ -106,10 +105,9 @@ export const run = async (names: string[], options: UpdateOptions): Promise<void
   const source = sourceSelector(options.source, names);
   const reportPath = await reportTarget(options.report);
   p.intro("nik update");
-  const scope = resolveScope(options, p.log.warn) ?? "project";
+  const scope = resolveScope(options, logWarn) ?? "project";
   const { minimumReleaseAge, policy } = await readProjectConfig(scope);
   const days = minReleaseAge(options.minReleaseAge, minimumReleaseAge);
-  await migrateIfLegacy(scope);
   const report: UpdateReport = {
     scope,
     updated: [],
@@ -158,13 +156,11 @@ const sourceSelector = (value: unknown, names: string[]): SourceSelector | undef
 
 const fromSource = (lock: Lockfile, source: SourceSelector | undefined): Lockfile => {
   if (!source) return lock;
-  const skills = Object.fromEntries(
-    Object.entries(lock.skills).filter(([, entry]) => selectsSource(source, entry)),
-  );
-  if (Object.keys(skills).length === 0) {
+  const scoped = filterLock(lock, (entry) => selectsSource(source, entry));
+  if (Object.keys(scoped.skills).length === 0) {
     fail(`No recorded skill comes from ${describeSelector(source)}.`);
   }
-  return { ...lock, skills };
+  return scoped;
 };
 
 const reportTarget = async (value: unknown): Promise<string | undefined> => {
@@ -346,7 +342,7 @@ const destinationFor = async (
 ): Promise<Destination> => {
   const { destination, defaulted } = await updateDestination(skill, scope, lock);
   if (defaulted && destination.kind === "link") {
-    warn(`${skillName(skill.name)}: missing. Linking to ${destination.agents.join(", ")}.`);
+    logWarn(`${skillName(skill.name)}: missing. Linking to ${destination.agents.join(", ")}.`);
   }
   return destination;
 };
@@ -550,12 +546,6 @@ const checkTarget = async (
   scopeWarning: (message: string) => void,
 ): Promise<CheckTarget> => {
   const scope = resolveScope(options, scopeWarning) ?? "project";
-  // The check writes nothing, so it stops instead of moving files, as audit does.
-  if (legacyLayoutPresent(scope)) {
-    throw new Error(
-      `found files from ski 0.2. Run \`nik list${scopeFlag(scope)}\` once to move them, then check again.`,
-    );
-  }
   const { policy } = await readProjectConfig(scope);
   const loaded = await loadLock(scope);
   const { enabled, disabled } = splitDisabled(loaded.lock);
@@ -587,7 +577,7 @@ const runCheck = async (names: string[], options: UpdateOptions): Promise<void> 
   const empty = Object.keys(target.loaded.lock.skills).length === 0;
   const emptyMessage = empty ? await emptyScopeMessage(scope) : "";
   p.intro("nik update --check");
-  for (const message of warnings) p.log.warn(message);
+  for (const message of warnings) logWarn(message);
   if (empty) {
     p.outro(emptyMessage);
     return;

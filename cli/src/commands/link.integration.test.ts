@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -15,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { $ } from "bun";
 import {
   cliRunner,
   commitAll,
@@ -172,6 +174,43 @@ test("prompted add asks for the scope and the agents, then links", async () => {
   expect(Object.keys(await readSkills(root))).toEqual(["demo"]);
 });
 
+// Codex detection also reads /etc/codex, which no environment variable redirects.
+test.skipIf(existsSync("/etc/codex"))(
+  "the agent picker opens without a no-agent warning when nothing is detected",
+  async () => {
+    const root = await project("prompted-undetected", "demo");
+    const bin = join(tmp, "git-only-bin");
+    await mkdir(bin, { recursive: true });
+    await symlink(Bun.which("git")!, join(bin, "git"));
+    const restorePath = captureEnv("PATH");
+    process.env.PATH = bin;
+    try {
+      const result = await runTerminal(
+        root,
+        [
+          { on: "Add where?", send: "\r" },
+          { on: "Link to which agents?", send: "\r" },
+          { on: "Add demo?", send: "\r" },
+        ],
+        "add",
+        "./skills/demo",
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).not.toContain("No agent detected");
+      expect(await isLink(join(root, ".claude", "skills", "demo"))).toBe(true);
+      expect((await readSkills(root))["demo"]).toMatchObject({ agents: ["claude"] });
+      expect(await listedRow(root)).toMatchObject({
+        name: "demo",
+        state: "installed",
+        agents: ["claude"],
+      });
+    } finally {
+      restorePath();
+    }
+  },
+);
+
 test("add --copy with an agent records the agents and no copyPath", async () => {
   const root = await project("agent-copy", "demo");
 
@@ -279,6 +318,88 @@ test("remove does not delete a link that niksi did not create", async () => {
   expect(await readSkills(root)).toEqual({});
 });
 
+test("add refuses a project whose .claude links to the global one and writes no skill or lockfile", async () => {
+  const root = await project("linked-claude", "demo");
+  const globalClaude = join(tmp, ".claude");
+  await mkdir(join(globalClaude, "skills"), { recursive: true });
+  await symlink(globalClaude, join(root, ".claude"));
+  try {
+    const result = await runCli(root, "add", "./skills/demo", "-p", "--agent", "claude", "--yes");
+
+    expect(result.exitCode).toBe(1);
+    expect(await readdir(join(globalClaude, "skills"))).toEqual([]);
+    expect(existsSync(join(root, "niksi-lock.json"))).toBe(false);
+    expect(existsSync(join(root, ".niksi", "skills", "demo"))).toBe(false);
+    const listed = await runCli(root, "list", "--json");
+    expect(listed.exitCode).toBe(0);
+    expect(JSON.parse(listed.stdout).skills).toEqual([]);
+  } finally {
+    await rm(globalClaude, { recursive: true, force: true });
+  }
+});
+
+test("install refuses to restore into a .claude that links to the global one", async () => {
+  const root = await project("linked-restore", "demo");
+  await addLink(root, "demo");
+  const lock = await readFile(join(root, "niksi-lock.json"), "utf8");
+  await rm(join(root, ".claude"), { recursive: true });
+  await rm(join(root, ".niksi"), { recursive: true });
+  const globalClaude = join(tmp, ".claude");
+  await mkdir(join(globalClaude, "skills"), { recursive: true });
+  await symlink(globalClaude, join(root, ".claude"));
+  try {
+    const result = await runCli(root, "install", "--yes");
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("through the symlink");
+    expect(await readdir(join(globalClaude, "skills"))).toEqual([]);
+    expect(existsSync(join(root, ".niksi", "skills", "demo"))).toBe(false);
+    expect(await readFile(join(root, "niksi-lock.json"), "utf8")).toBe(lock);
+    expect(await listedRow(root)).toMatchObject({ name: "demo", state: "missing" });
+  } finally {
+    await rm(globalClaude, { recursive: true, force: true });
+  }
+});
+
+test("remove refuses the whole selection when a .claude links to the global one", async () => {
+  const root = await project("linked-remove", "demo");
+  await addLink(root, "demo");
+  const lock = await readFile(join(root, "niksi-lock.json"), "utf8");
+  await rm(join(root, ".claude"), { recursive: true });
+  const globalClaude = join(tmp, ".claude");
+  await mkdir(join(globalClaude, "skills"), { recursive: true });
+  const globalLink = join(globalClaude, "skills", "demo");
+  await symlink(join(root, ".niksi", "skills", "demo"), globalLink);
+  await symlink(globalClaude, join(root, ".claude"));
+  try {
+    const result = await runCli(root, "remove", "demo", "--yes");
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("through the symlink");
+    expect(await isLink(globalLink)).toBe(true);
+    expect(existsSync(join(root, ".niksi", "skills", "demo", "SKILL.md"))).toBe(true);
+    expect(await readFile(join(root, "niksi-lock.json"), "utf8")).toBe(lock);
+    expect(await listedRow(root)).toMatchObject({ name: "demo", state: "installed" });
+  } finally {
+    await rm(globalClaude, { recursive: true, force: true });
+  }
+});
+
+test("a refused skills directory prints its path with control characters escaped", async () => {
+  const root = await project("escaped-refusal", "demo");
+  const evil = join(tmp, "niksi-home", "store", "evil\u001B[2J");
+  await mkdir(evil, { recursive: true });
+  await mkdir(join(root, ".claude"), { recursive: true });
+  await symlink(evil, join(root, ".claude", "skills"));
+
+  const result = await runCli(root, "add", "./skills/demo", "-p", "--agent", "claude", "--yes");
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).not.toContain("\u001B[2J");
+  expect(result.stderr).toContain("evil^[[2J");
+  expect(await readdir(evil)).toEqual([]);
+});
+
 test("list --json reports link and agent-copy entries, installed, modified, and missing", async () => {
   const names = ["linked", "kept", "unlinked", "dangling", "retargeted"];
   const root = await project("list", "copied", ...names);
@@ -372,6 +493,127 @@ test("add --all installs the skills in skills/ and in plugins/*/skills/ together
       state: "installed",
     }),
   ]);
+});
+
+test("add refuses a same-name skill from another path of the recorded Git source", async () => {
+  const root = await project("same-repo-collision");
+  const repo = join(tmp, "collision-source");
+  await makeSkill(join(repo, "plugins", "a", "skills"), "demo", "from a\n");
+  await makeSkill(join(repo, "plugins", "b", "skills"), "demo", "from b\n");
+  await initRepo(repo);
+  await commitAll(repo, "two demos");
+  const source = pathToFileURL(repo).href;
+  const add = (path: string) => runCli(root, "add", source, path, "-p", "--agent", "claude", "-y");
+
+  expect((await add("plugins/a/skills/demo")).exitCode).toBe(0);
+  const refused = await add("plugins/b/skills/demo");
+
+  expect(refused.exitCode).toBe(1);
+  expect((await readSkills(root))["demo"]).toMatchObject({ source, path: "plugins/a/skills/demo" });
+  expect(await readFile(join(root, ".claude", "skills", "demo", "SKILL.md"), "utf8")).toContain(
+    "from a",
+  );
+  expect(await listedRow(root)).toMatchObject({
+    name: "demo",
+    source,
+    path: "plugins/a/skills/demo",
+    state: "installed",
+  });
+});
+
+test("add takes an SCP address with no owner", async () => {
+  const root = await project("scp-no-owner");
+  const host = join(tmp, "ssh-host");
+  await makeSkill(join(host, "repo.git", "skills"), "demo");
+  await initRepo(join(host, "repo.git"));
+  await commitAll(join(host, "repo.git"), "init");
+  const ssh = join(tmp, "bin", "ssh-host");
+  await mkdir(join(tmp, "bin"), { recursive: true });
+  // Runs the remote command on this machine, from the directory that stands in for the host.
+  await writeFile(ssh, `#!/bin/sh\nfor last; do :; done\ncd '${host}' && exec sh -c "$last"\n`);
+  await chmod(ssh, 0o755);
+  const source = "git@niksi-test.invalid:repo.git";
+
+  const restore = captureEnv("GIT_SSH_COMMAND");
+  process.env.GIT_SSH_COMMAND = ssh;
+  try {
+    const added = await runCli(root, "add", source, "demo", "-p", "--agent", "claude", "-y");
+    expect(added.exitCode).toBe(0);
+  } finally {
+    restore();
+  }
+
+  expect((await readSkills(root))["demo"]).toMatchObject({ source, path: "skills/demo" });
+  expect(existsSync(join(root, ".claude", "skills", "demo", "SKILL.md"))).toBe(true);
+  expect(await listedRow(root)).toMatchObject({ name: "demo", source, state: "installed" });
+});
+
+test("add from a cached source follows a default branch renamed upstream", async () => {
+  const root = await project("renamed-default");
+  const repo = join(tmp, "renamed-source");
+  await makeSkill(join(repo, "skills"), "alpha");
+  await makeSkill(join(repo, "skills"), "beta");
+  await initRepo(repo);
+  await commitAll(repo, "two skills");
+  const source = pathToFileURL(repo).href;
+  const add = (name: string) => runCli(root, "add", source, name, "-p", "--agent", "claude", "-y");
+  expect((await add("alpha")).exitCode).toBe(0);
+  await $`git -C ${repo} branch -m main trunk`.quiet();
+
+  expect((await add("beta")).exitCode).toBe(0);
+
+  expect((await readSkills(root))["beta"]).toMatchObject({ source, branch: "trunk" });
+  expect(existsSync(join(root, ".claude", "skills", "beta", "SKILL.md"))).toBe(true);
+  const listed = await runCli(root, "list", "--json");
+  expect(listed.exitCode).toBe(0);
+  expect(JSON.parse(listed.stdout).skills).toEqual([
+    expect.objectContaining({ name: "alpha", state: "installed" }),
+    expect.objectContaining({ name: "beta", state: "installed" }),
+  ]);
+});
+
+const rawSkillUrl = (ref: string): string =>
+  `https://raw.githubusercontent.com/o/raw-skills/${ref}/skills/demo/SKILL.md`;
+
+test("add of a raw GitHub URL installs the branch or tag that its full ref names", async () => {
+  const forge = "https://github.com/o/raw-skills";
+  const repo = join(tmp, "raw-skills");
+  await makeSkill(join(repo, "skills"), "demo", "Tagged.\n");
+  await initRepo(repo);
+  const tagged = await commitAll(repo, "tagged");
+  await tagHead(repo, "v1.0.0");
+  await makeSkill(join(repo, "skills"), "demo", "Head of main.\n");
+  const head = await commitAll(repo, "head");
+  const restore = captureEnv("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0");
+  process.env.GIT_CONFIG_COUNT = "1";
+  process.env.GIT_CONFIG_KEY_0 = `url.${pathToFileURL(repo).href}.insteadOf`;
+  process.env.GIT_CONFIG_VALUE_0 = forge;
+  try {
+    for (const [ref, commit, body, recorded] of [
+      ["refs/heads/main", head, "Head of main.", { branch: "main" }],
+      ["refs/tags/v1.0.0", tagged, "Tagged.", { pinnedAs: "v1.0.0" }],
+    ] as const) {
+      const root = await project(`raw-${ref.replaceAll("/", "-")}`);
+      const added = await runCli(root, "add", rawSkillUrl(ref), "-p", "--agent", "claude", "-y");
+      expect(added.exitCode).toBe(0);
+      expect((await readSkills(root))["demo"]).toMatchObject({
+        source: forge,
+        path: "skills/demo",
+        commit,
+        track: "pin",
+        ...recorded,
+      });
+      const linked = join(root, ".claude", "skills", "demo", "SKILL.md");
+      expect(await readFile(linked, "utf8")).toContain(body);
+      expect(await listedRow(root)).toMatchObject({
+        name: "demo",
+        source: forge,
+        state: "installed",
+      });
+    }
+  } finally {
+    restore();
+  }
 });
 
 test("add of owner/repo/<path> that discovery skips installs that skill rooted at the path", async () => {

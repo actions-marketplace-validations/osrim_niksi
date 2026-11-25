@@ -19,13 +19,14 @@ import {
 import { readConfig, remember } from "../core/config.ts";
 import type { InstalledSkill } from "../core/install/destination.ts";
 import { syncExcludes } from "../core/install/exclude.ts";
+import { assertSkillsDirSafe } from "../core/install/link.ts";
 import { placementOf } from "../core/install/lockfile.ts";
 import { projectRoot, type Scope } from "../core/paths.ts";
 import { otherScope, resolveScope, type ScopeOptions } from "../core/install/scope.ts";
 import { usageError } from "../core/usage.ts";
-import { isInteractive, unwrap } from "./prompt.ts";
-import { logWarn, warn } from "./report.ts";
-import { dim, pad, skillName, tildify } from "./style.ts";
+import { fail, isInteractive, unwrap } from "./prompt.ts";
+import { logWarn } from "./report.ts";
+import { dim, escapeControl, pad, skillName, tildify } from "./style.ts";
 
 interface AgentSelection {
   agent?: string | string[];
@@ -42,7 +43,7 @@ export const chooseScope = async (
   message = "Add where?",
 ): Promise<Scope> => {
   const preferred = (await readConfig()).scope ?? "project";
-  const resolved = resolveScope(options, p.log.warn);
+  const resolved = resolveScope(options, logWarn);
   if (resolved) {
     if (options.global || options.project) await remember({ scope: resolved });
     return resolved;
@@ -134,22 +135,26 @@ export const preferredAgents = (
 
 const NO_AGENT = "No agent detected. Using claude. Pass --agent to choose.";
 
+const AGENT_IGNORED = "Ignoring --agent. Every skill to restore records its destination.";
+
+export const checkAgentFlag = (value: string | string[] | undefined): AgentId[] | null => {
+  try {
+    return parseAgentFlag(value);
+  } catch (e) {
+    throw usageError((e as Error).message);
+  }
+};
+
 export const chooseAgents = async (
   options: AgentSelection,
   scope: Scope,
   mode: Mode = "link",
 ): Promise<AgentId[]> => {
   const { imperative, gerund, explainer } = VERBS[mode];
-  const explicit = ((): AgentId[] | null => {
-    try {
-      return parseAgentFlag(options.agent);
-    } catch (e) {
-      throw usageError((e as Error).message);
-    }
-  })();
+  const explicit = checkAgentFlag(options.agent);
   const detected = detectAgents(scope);
   if (explicit) {
-    for (const warning of unreadWarnings(options.agent, scope)) warn(warning);
+    for (const warning of unreadWarnings(options.agent, scope)) logWarn(warning);
     await remember({ agents: explicit });
     return warnOverlap(explicit, scope, detected);
   }
@@ -158,13 +163,12 @@ export const chooseAgents = async (
 
   if (options.yes || !isInteractive()) {
     const preferred = preferredAgents(scope, remembered, detected);
-    if (!remembered && detected.length === 0) warn(NO_AGENT);
+    if (!remembered && detected.length === 0) logWarn(NO_AGENT);
     p.log.info(`${gerund} to ${preferred.join(", ")}.`);
     return warnOverlap(preferred, scope, detected);
   }
 
   const preferred = preferredAgents(scope, remembered, detected);
-  if (detected.length === 0) warn(NO_AGENT);
   if (explainer) p.log.info(explainer);
   const picker = agentRows(scope, detected, preferred);
   const message = `${imperative} to which agents?`;
@@ -190,8 +194,18 @@ export const chooseAgents = async (
 };
 
 const warnOverlap = (agents: AgentId[], scope: Scope, detected: DetectedAgent[]): AgentId[] => {
-  for (const warning of overlapWarnings(agents, scope, detected)) warn(warning);
+  for (const warning of overlapWarnings(agents, scope, detected)) logWarn(warning);
   return agents;
+};
+
+// Exits 1 before any write when a skills directory resolves into a place niksi must not write.
+export const refuseUnsafeSkillsDirs = async (
+  scope: Scope,
+  agents: Iterable<AgentId>,
+): Promise<void> => {
+  for (const agent of agents) {
+    await assertSkillsDirSafe(scope, agent).catch((e: Error) => fail(escapeControl(e.message)));
+  }
 };
 
 export const warnAncestorCollisions = (names: string[]): void => {
@@ -234,6 +248,20 @@ const recordedLinkAgents = (skill: InstalledSkill): AgentId[] | null => {
 
 export const needsAgents = (skills: InstalledSkill[]): boolean =>
   skills.some((skill) => recordedLinkAgents(skill)?.length === 0);
+
+export const restoreAgents = async (
+  skills: InstalledSkill[],
+  options: AgentSelection,
+  scope: Scope,
+): Promise<AgentId[]> => {
+  if (!needsAgents(skills)) {
+    if (options.agent !== undefined) logWarn(AGENT_IGNORED);
+    return [];
+  }
+  const agents = await chooseAgents(options, scope);
+  await refuseUnsafeSkillsDirs(scope, agents);
+  return agents;
+};
 
 export const warnLinkCollisions = (
   skills: InstalledSkill[],

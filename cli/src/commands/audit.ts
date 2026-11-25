@@ -1,6 +1,5 @@
 import * as p from "@clack/prompts";
 import { loadLock, type LoadedLockfile } from "../core/install/lockfile.ts";
-import { legacyLayoutPresent } from "../core/install/migrate.ts";
 import {
   installedPaths,
   installedSkills,
@@ -22,7 +21,7 @@ import { rank } from "../core/scan/severity.ts";
 import { readDirFiles, type SkillFile } from "../core/skill/files.ts";
 import { integrityOf } from "../core/skill/integrity.ts";
 import type { CommandHelp } from "../ui/help.ts";
-import { logFindings, logSkillError, logWarn, warn } from "../ui/report.ts";
+import { logFindings, logSkillError, logWarn, reviewWarn } from "../ui/report.ts";
 import { emptyScopeMessage, reportDisabled } from "../ui/status.ts";
 import { skillName, tildify } from "../ui/style.ts";
 
@@ -66,15 +65,6 @@ const acceptedCount = (scanned: Scanned[]): number =>
     (sum, { findings }) => sum + findings.filter(({ accepted }) => accepted).length,
     0,
   );
-
-const openLock = (scope: Scope): Promise<LoadedLockfile> => {
-  if (legacyLayoutPresent(scope)) {
-    throw new Error(
-      `found files from ski 0.2. Run \`nik list${scopeFlag(scope)}\` once to move them, then audit again.`,
-    );
-  }
-  return loadLock(scope);
-};
 
 // Copies with the same content give the same findings, so scan each distinct content once.
 const scanCopies = (name: string, contents: SkillFile[][]): Finding[] => {
@@ -133,8 +123,8 @@ export const run = async (options: AuditOptions): Promise<void> => {
   if (options.json) return runJson(options);
 
   p.intro("nik audit");
-  const scope = resolveScope(options, p.log.warn) ?? "project";
-  const loaded = await openLock(scope);
+  const scope = resolveScope(options, logWarn) ?? "project";
+  const loaded = await loadLock(scope);
   const { policy } = await readProjectConfig(scope);
   if (Object.keys(loaded.lock.skills).length === 0) {
     p.outro(await emptyScopeMessage(scope));
@@ -153,7 +143,7 @@ export const run = async (options: AuditOptions): Promise<void> => {
 const reportScanned = ({ skill, findings, modified }: Scanned, scope: Scope): void => {
   logFindings(skill.name, findings);
   if (!modified) return;
-  warn(
+  logWarn(
     `${skillName(skill.name)}: modified, so no critical finding is accepted.\nRun \`nik install${scopeFlag(scope)}\` to restore the reviewed files.`,
   );
 };
@@ -170,9 +160,9 @@ const reportSkipped = ({ missing, disabled }: Audit, scope: Scope): void => {
 const reportRemedy = ({ scanned }: Audit, scope: Scope): void => {
   if (flagged(scanned, "critical") + flagged(scanned, "warn") === 0) return;
   if (deniesWarn(scanned)) {
-    warn(`${PROJECT_CONFIG_NAME} sets policy.denyWarn, so warn findings fail the audit.`);
+    reviewWarn(`${PROJECT_CONFIG_NAME} sets policy.denyWarn, so warn findings fail the audit.`);
   }
-  warn(
+  reviewWarn(
     `Read the flagged files. Run \`nik disable${scopeFlag(scope)}\` or \`nik remove${scopeFlag(scope)}\` to stop agents loading a skill.`,
   );
 };
@@ -192,7 +182,7 @@ const summaryLine = ({ scanned }: Audit, scope: Scope): string => {
 
 const runJson = async (options: AuditOptions): Promise<void> => {
   const scope = resolveScope(options, logWarn) ?? "project";
-  const loaded = await openLock(scope);
+  const loaded = await loadLock(scope);
   const { policy } = await readProjectConfig(scope);
   const audit = await auditLock(loaded, scope, policy?.denyWarn);
   setExitCode(audit);

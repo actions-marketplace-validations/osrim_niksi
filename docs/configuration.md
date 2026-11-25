@@ -59,6 +59,8 @@ When a detected agent reads two or more of the chosen directories, `niksi` warns
 
 Editing a linked skill changes it for every linked agent.
 
+`niksi` won't write to a skills directory that lands inside its data directory (`NIKSI_HOME`, or `~/.local/share/niksi` by default, see [Paths](#paths)). In project scope, it also won't write to one that lands inside a global skills directory from the table above. This covers a project `.claude` that links to `~/.claude`, a project inside a global skills directory, and `-p` run from your home directory, where `.claude/skills` is `~/.claude/skills`. `add`, `install`, `enable`, `remove`, and `disable` check every skills directory they will touch first, and exit `1` before they change any skill, so one refused directory stops the whole selection. When a symlink causes the overlap, the error names it so you can remove it. Otherwise, run project installs from a project outside that directory, and point global agent directories outside the data directory.
+
 In project scope, `.niksi/.gitignore` keeps the skill directories out of Git. Links in the agents' skills directories are hidden with `.git/info/exclude`, in a block that `niksi` rebuilds after every write. Commit `niksi-lock.json`. Copies made with `--copy` can be committed.
 
 ## Path copies
@@ -140,15 +142,11 @@ A `niksi.json` that isn't a JSON object, has a value of the wrong type, or has a
 
 `NIKSI_HOME` replaces the data and config roots at once. `NIKSI_HOME=/tmp/x` puts the global skills, the global lockfile, the store, and the config under `/tmp/x`. It does not move the cache.
 
-### Migrating from ski
-
-Before 0.3.0 the project was named `ski`. The first `nik` command in a project renames `ski-lock.json` to `niksi-lock.json` and `.ski` to `.niksi`, re-points the agent skill links, renames the block in `.git/info/exclude`, and moves `~/.config/ski/config.json` to `~/.config/niksi/config.json`. The first `nik` command with `-g` moves the global skills, lockfile, store, config, and cache from `~/.local/share/ski`, `~/.config/ski`, and `~/.cache/ski` to `niksi` the same way. A skills directory or lockfile whose new path already exists is left alone. An old store, cache, or config beside a new one is deleted. `SKI_HOME` is now `NIKSI_HOME`. A set `SKI_HOME` without `NIKSI_HOME` exits `2`.
-
 ### Moving an existing global lockfile
 
-The global lockfile is `$XDG_CONFIG_HOME/niksi/niksi-lock.json`, or `~/.config/niksi/niksi-lock.json` when `XDG_CONFIG_HOME` is unset. If that file does not exist, `niksi` keeps using the legacy lockfile at `$XDG_DATA_HOME/niksi/niksi-lock.json`, which defaults to `~/.local/share/niksi/niksi-lock.json`. Reads and writes keep using the legacy file until you move it.
+The global lockfile is `$XDG_CONFIG_HOME/niksi/niksi-lock.json`, or `~/.config/niksi/niksi-lock.json` when `XDG_CONFIG_HOME` is unset or relative. If that file does not exist, `niksi` keeps using the legacy lockfile at `$XDG_DATA_HOME/niksi/niksi-lock.json`, which defaults to `~/.local/share/niksi/niksi-lock.json`. Reads and writes keep using the legacy file until you move it.
 
-When both files exist, `niksi` uses the config file. Confirm that the config file does not already exist, then migrate by moving the legacy file:
+When both files exist, `niksi` uses the config file. Confirm that the config file does not already exist, then migrate by moving the legacy file. The commands assume that each XDG variable is unset or absolute:
 
 ```sh
 config_home=${XDG_CONFIG_HOME:-"$HOME/.config"}
@@ -159,7 +157,7 @@ mv "$data_home/niksi/niksi-lock.json" "$config_home/niksi/niksi-lock.json"
 
 Do not copy the file. Leaving both paths populated makes the legacy file inactive and lets the two files drift. `NIKSI_HOME` users do not need to migrate because both paths resolve to `$NIKSI_HOME/niksi-lock.json`.
 
-Every path variable, including `HOME` and `CLAUDE_HOME`, must be an absolute path. `~` is not expanded.
+Path variables take absolute paths, and `~` is not expanded. A relative `HOME`, `NIKSI_HOME`, or `CLAUDE_HOME` stops the command with an error. A relative XDG variable counts as unset, so its default applies, as the [XDG Base Directory specification](https://specifications.freedesktop.org/basedir-spec/latest/) requires. `niksi` treats a relative `CODEX_HOME` the same way and uses `~/.codex`.
 
 The store is a download cache. A lockfile entry installs without the network when the store holds its content, and installed skills do not depend on it. `nik prune` deletes unrecorded store entries. It keeps every entry that the global lockfile or the current project's lockfile records. See [commands.md](commands.md#prune).
 
@@ -176,6 +174,7 @@ Each entry records the skill's source, path, revision, integrity, and placement,
 | `NIKSI_HOME` | Root for data and config. See [Paths](#paths). |
 | `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` | Standard XDG roots. |
 | `CLAUDE_HOME` | Global Claude directory. Default `~/.claude`. |
+| `CODEX_HOME` | Codex directory, used to detect Codex. Default `~/.codex`. |
 | `NO_COLOR` | Disable color. |
 | `FORCE_COLOR` | Enable color when stdout is not a terminal. |
 | `CI`, `NO_UPDATE_NOTIFIER`, `NIKSI_NO_UPDATE_NOTIFIER` | Disable the update notice and its release check. |

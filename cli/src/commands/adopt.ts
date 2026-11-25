@@ -32,11 +32,10 @@ import { usageError, USAGE_ERROR } from "../core/usage.ts";
 import { land } from "../ui/flow.ts";
 import { confirmWrite, reviewSkills, type ReviewOptions } from "../ui/gate.ts";
 import type { CommandHelp } from "../ui/help.ts";
-import { migrateIfLegacy } from "../ui/migrate.ts";
 import { fail, requireTTY, unwrap, withSpinner } from "../ui/prompt.ts";
-import { logError, logSkillError, warn } from "../ui/report.ts";
+import { logError, logSkillError, logWarn } from "../ui/report.ts";
 import { friendlySource } from "../ui/status.ts";
-import { bold, dim, pad, skillName } from "../ui/style.ts";
+import { bold, dim, escapeControl, pad, skillName } from "../ui/style.ts";
 
 export const help: CommandHelp = {
   description:
@@ -82,11 +81,10 @@ const sourceOption = (raw: string | string[] | undefined): Source | undefined =>
 
 export const run = async (names: string[], options: AdoptOptions): Promise<void> => {
   p.intro("nik adopt");
-  const scope = resolveScope(options, p.log.warn) ?? "project";
+  const scope = resolveScope(options, logWarn) ?? "project";
   const from = sourceOption(options.source);
   const { policy } = await readProjectConfig(scope);
   refuseSource(from, policy);
-  await migrateIfLegacy(scope);
   const loaded = await loadLock(scope);
   const { skills, skipped } = await findUnmanaged(scope, loaded.lock);
   reportSkipped(skipped, names);
@@ -169,18 +167,18 @@ const planOf = (item: Resolved & { acceptedRules: string[] }): AdoptPlan => ({
 
 const shown = (path: string): string => {
   const rel = relative(process.cwd(), path);
-  return rel.startsWith("..") ? tildify(path) : rel;
+  return escapeControl(rel.startsWith("..") ? tildify(path) : rel);
 };
 
 const reportSkipped = (skipped: SkippedSkill[], names: string[]): void => {
   for (const { name, reason, paths, target } of skipped) {
     if (names.length > 0 && !names.includes(name)) continue;
     if (reason === "differ") {
-      warn(
+      logWarn(
         `${skillName(name)}: copies differ: ${paths.map(shown).join(", ")}\nKeep one copy, then run \`nik adopt\` again.`,
       );
     } else {
-      warn(
+      logWarn(
         `${skillName(name)}: ${shown(paths[0]!)} links to ${shown(target!)}\nTo record it, delete the link and run \`nik add ${shown(target!)}\`.`,
       );
     }

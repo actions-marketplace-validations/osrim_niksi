@@ -38,6 +38,8 @@ git@github.com:owner/repo.git     clone URL
 
 `owner/repo` always means GitHub. Every other forge needs a full URL. A URL path is the repository, so name the skill as a positional argument instead.
 
+A clone URL can use any SSH user and needs no owner, as in `deploy@git.example.com:team/repo.git` or `git@git.example.com:repo.git`.
+
 Segments after `owner/repo` name one skill. `add` resolves them in this order:
 
 1. The path of a skill that discovery finds in the source.
@@ -52,6 +54,7 @@ Segments after `owner/repo` name one skill. `add` resolves them in this order:
   `https://github.com/o/r/tree/main/plugins/x` searches `plugins/x`.
   The lockfile records this discovery root as `root`.
 - Named skills must exist in the source and have distinct names.
+- `add` doesn't install a skill when the scope already has one by that name from another source or another path. When you name the skill, `add` says where the installed one came from and exits `1`. The picker shows the skill as unavailable, and `--all` leaves it out. Run `nik remove <skill>` first.
 - `@ref` pins the skill. A pinned skill updates only when you name it in `nik update`.
 - Without `@ref`, `add` installs the upstream revision, a tag or the head of a branch (see [Tag or branch](#tag-or-branch)), even when it is younger than the [cooldown](#cooldown), and prints one warning with its age: `v2.0.0 is 1 day old, inside the 3-day cooldown.` `--min-release-age 0` turns the warning off.
 - `add` shows and scans every file before writing. `Read files…` at the review questions opens the files in a pager. See [security-scan.md](security-scan.md).
@@ -59,7 +62,8 @@ Segments after `owner/repo` name one skill. `add` resolves them in this order:
 - When `niksi.json` sets `policy.denyWarn`, a warn finding needs approval like a critical one, and `--yes` doesn't accept it. See [security-scan.md](security-scan.md#severities).
 - `add` offers to review missing dependencies mentioned by approved skills. With
   `--yes` or without a terminal, it prints a `nik add` command instead. This
-  command uses the same discovery root.
+  command uses the same discovery root. When the discovery root is in an SSH or
+  `file://` source, `add` prints a warning instead of the command.
 - `add` skips a mentioned skill that the current scope records. An enabled skill
   in the other scope counts only when a link or agent copy is present in every
   selected agent directory. When it counts, `add` names that scope. Path copies
@@ -185,7 +189,7 @@ Restoring a modified skill discards your edits, so `install` asks first. Without
 
 Agent copies install to the agents recorded in the entry. Path copies install to their recorded destination roots.
 
-Link entries install to the agents recorded in the entry. A link entry without recorded agents, such as one from a version 1 lockfile, installs to the agents you pass with `--agent`, or to the saved or detected defaults. A lockfile without such an entry selects no agents, and `install --agent` says that it ignores the flag. `install` does not write the lockfile, so it does not record those agents.
+Link entries install to the agents recorded in the entry. A link entry without recorded agents, such as one from a version 1 lockfile, installs to the agents you pass with `--agent`, or to the saved or detected defaults. When the lockfile has enabled entries but no such entry, `install` selects no agents, and `install --agent` says that it ignores the flag. An unknown agent in `--agent`, or a value with no agent such as `,`, exits `2` before `install` reads the lockfile. `install` does not write the lockfile, so it does not record those agents.
 
 `install` skips disabled entries. It prints their count and names, and it names `nik enable`. It selects agents only when an enabled link entry without recorded agents exists. Its summary counts enabled entries only.
 
@@ -211,16 +215,18 @@ nik update --check [-g|-p] [--json]
 - `update` reports missing dependencies but does not install them. If an entry
   has a `root`, both the check and the `nik add` command use that directory.
   `https://github.com/o/r/tree/main/plugins/x` searches `plugins/x`.
-  For remote sources, the command uses the recorded branch. If absent, it uses
-  `pinnedAs`, `tag`, or `commit`, in that order. Without any of these, `update`
-  reports that it cannot generate the command.
+  For an `https://` source, the forge URL names a ref: the recorded branch for
+  a dependency that a skill tracking `auto` mentions, and the reviewed ref for
+  one that only pinned skills mention. For an SSH or `file://` source with a
+  `root`, or an entry that records no ref, `update` prints a warning instead of
+  the command.
 - When only pinned skills mention a missing dependency, its `nik add` command
   ends the coordinate with `@<ref>`, so the dependency lands at the revision you
   reviewed. The ref is the new `pinnedAs` tag, or the commit when there is no
   tag or the tag has a character other than an ASCII letter, a digit, `.`, `_`,
-  `+`, or `-`. In a forge URL, `@<ref>` takes precedence over the branch in the
-  path. A dependency that a skill tracking `auto` mentions gets a command
-  without `@ref`, so one source can print two commands.
+  `+`, or `-`. A forge URL names the same ref in its path. A dependency that a
+  skill tracking `auto` mentions gets a command without `@ref`, so one source
+  can print two commands.
 - A dependency that the current scope records is not missing. An enabled
   dependency in the other scope counts only when a link or agent copy is present
   in every agent directory used by the updated skill. When it counts, `update`
@@ -283,7 +289,6 @@ With `--check`, `update` checks every enabled skill against its source and shows
 - It ignores the [cooldown](#cooldown). A skill with a young upstream revision still counts as outdated.
 - It doesn't check disabled skills. It names them in one info line.
 - In project scope, it doesn't check a skill whose source the policy in `niksi.json` doesn't allow. It names each such skill and its source. See [Project configuration](configuration.md#project-configuration).
-- When files from ski 0.2 need moving, it exits `1` and names `nik list`, which moves them.
 - It takes only `-g`, `-p`, and `--json`. Skill names, `--all`, `--source`, `--yes`, `--dangerous-skip-critical-approval`, `--report`, and `--min-release-age` with `--check` exit `2`. So does `--json` without `--check`.
 
 `--json` writes one JSON object to stdout and nothing else. Diagnostics go to stderr. `skills` holds each checked skill, sorted by name. `disabled` holds the names of disabled skills, and `blocked` holds the names of skills that the project policy left out. The check covers neither.
@@ -424,7 +429,7 @@ nik audit [-g|-p] [--json]
 `audit` scans every installed skill with the current rules. `add` and `update` scan a skill once, when they write it. Run `audit` after you upgrade `niksi` to check skills you approved under older rules.
 
 - `audit` reads the files on disk, not the store. A link entry reads its canonical copy. An agent copy reads every copy present in a recorded agent's skills directory and scans copies with the same content once. A path copy reads its destination.
-- `audit` does not use the network and does not write. It skips the update notice and its release check. When files from ski 0.2 need moving, it exits `1` and names `nik list`, which moves them.
+- `audit` does not use the network and does not write. It skips the update notice and its release check.
 - It prints the findings of each skill with their severities. It asks nothing, so a critical finding never needs a terminal.
 - A critical finding whose rule id the lockfile entry lists in `review.acceptedRules` is accepted: `add` or `update` approved it for that content. `audit` still prints it with its severity, marks it `(accepted)`, and counts it in the summary as `N accepted finding(s)`, apart from the other findings. It does not change the exit code. See [security-scan.md](security-scan.md#accepted-findings).
 - An acceptance holds only while the files on disk match the entry's `integrity`. For an agent copy, every present copy must match. For a modified skill, `audit` accepts no finding and says that the skill is modified.
@@ -495,7 +500,7 @@ nik enable [...skills|source] [-g|-p] [-a] [-y] [--agent <id>]
 `enable` clears the mark and restores each skill as `install` does. It reads the store or the source and checks the recorded integrity. A local source must still have the skill and match the recorded integrity, as in `install`. It does not review, scan, or check dependencies.
 
 - Select skills and sources as in `disable`. `--all` selects every disabled skill. A skill that is already enabled prints `name: already enabled`.
-- Link entries restore to their recorded agents. A link entry without recorded agents needs agents: `enable` uses `--agent`, else the remembered choice, else the detected defaults, else a prompt, and records them in the entry. Agent copies and path copies restore to their recorded agents or destination root. A selection with no link entry that lacks recorded agents selects no agents.
+- Link entries restore to their recorded agents. A link entry without recorded agents needs agents: `enable` uses `--agent`, else the remembered choice, else the detected defaults, else a prompt, and records them in the entry. Agent copies and path copies restore to their recorded agents or destination root. When `enable` restores at least one entry and none is a link entry without recorded agents, it selects no agents, and `enable --agent` says that it ignores the flag. An unknown agent in `--agent`, or a value with no agent such as `,`, exits `2` before `enable` reads the lockfile.
 - If the content of an entry does not match its integrity, `enable` reports it as `install` does. The entry stays disabled. The command exits `1`.
 - In project scope, `enable` checks the selected entries against the policy in `niksi.json` first, as `install` does. When an entry comes from a source that the policy doesn't allow, `enable` names each such entry, enables nothing, and exits `1`.
 
@@ -560,7 +565,7 @@ An unknown shell exits `2`.
 | --- | --- | --- |
 | `-g`, `--global` | all but `prune` and `completion` | Use global scope. |
 | `-p`, `--project` | all but `prune` and `completion` | Use project scope. |
-| `--agent <id>` | `add`, `install`, `enable` | Install to `universal`, `claude`, `opencode`, `kiro`, `cline`, or `qwen`. An agent name such as `cursor` or `codex` resolves to the directory that agent reads. Repeat the flag or separate values with commas. |
+| `--agent <id>` | `add`, `install`, `enable` | Install to `universal`, `claude`, `opencode`, `kiro`, `cline`, or `qwen`. An agent name such as `cursor` or `codex` resolves to the directory that agent reads. Repeat the flag or separate values with commas. An unknown agent, or a value with no agent such as `,`, exits `2`. |
 | `-a`, `--all` | `add`, `adopt`, `update`, `remove`, `disable`, `enable` | Select every skill. `disable` selects enabled skills and `enable` selects disabled skills. It does not confirm or approve anything. |
 | `-y`, `--yes` | `add`, `adopt`, `install`, `update`, `remove`, `disable`, `enable`, `prune` | Accept ordinary confirmations and defaults. It cannot approve critical findings, or warn findings under `policy.denyWarn`. |
 | `--dangerous-skip-critical-approval` | `add`, `adopt`, `update` | Skip approval for critical findings. Dangerous. Files and findings remain visible. |
@@ -655,7 +660,7 @@ The report is written outside the repository, so `git add -A` does not commit it
 | code | meaning |
 | --- | --- |
 | `0` | Success or nothing to do. |
-| `1` | A skill failed. The rest of the batch still ran. In `install` and `enable`, this includes a local source that changed since `niksi-lock.json` or no longer has the skill. In `install --frozen-lockfile`, also no lockfile. In `install` and `enable`, also an entry from a source that the policy in `niksi.json` doesn't allow, and in `add`, a source that the policy doesn't allow. Then the command writes nothing. In `adopt`, also a skill whose source the policy doesn't allow. In `audit`, also a warn finding. In `update --check`, also a skill that isn't up to date. |
+| `1` | A skill failed. The rest of the batch still ran. In `install` and `enable`, this includes a local source that changed since `niksi-lock.json` or no longer has the skill. In `install --frozen-lockfile`, also no lockfile. In `install` and `enable`, also an entry from a source that the policy in `niksi.json` doesn't allow, and in `add`, a source that the policy doesn't allow. Then the command writes nothing. In `adopt`, also a skill whose source the policy doesn't allow. In `add`, `install`, `enable`, `remove`, and `disable`, also a skills directory that niksi refuses to write to (see [Agents](configuration.md#agents)). Then the command changes no skill. In `audit`, also a warn finding. In `update --check`, also a skill that isn't up to date. |
 | `2` | Invalid usage, an invalid `niksi.json`, or a prompt had no terminal and no flag. |
 | `3` | Critical findings, or warn findings under `policy.denyWarn`, blocked at least one skill in `add`, `adopt`, or `update` without `--dangerous-skip-critical-approval`. In `update` and `update --check`, also a skill whose source the policy in `niksi.json` doesn't allow. In `audit`, a critical finding in an installed skill whose rule the lockfile entry does not accept, or a warn finding under `policy.denyWarn`. Accepted critical findings do not change the `audit` exit code. When a run has reasons for both `1` and `3`, it exits `3`. |
 | `130` | Cancelled. |

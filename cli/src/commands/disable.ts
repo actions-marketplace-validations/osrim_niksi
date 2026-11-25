@@ -1,4 +1,3 @@
-import { assertSkillsDirSafe } from "../core/install/link.ts";
 import { loadLock, recordLinkAgents, splitDisabled } from "../core/install/lockfile.ts";
 import {
   holdsOwnSource,
@@ -13,9 +12,10 @@ import { resolveScope, scopeFlag, type ScopeOptions } from "../core/install/scop
 import { warnReferrers } from "../ui/deps.ts";
 import { confirm, land } from "../ui/flow.ts";
 import type { CommandHelp } from "../ui/help.ts";
-import { migrateIfLegacy } from "../ui/migrate.ts";
 import { selectRecorded } from "../ui/pick.ts";
-import { fail, intro, outro, promptWarn } from "../ui/prompt.ts";
+import { refuseUnsafeSkillsDirs } from "../ui/destination.ts";
+import { intro, outro } from "../ui/prompt.ts";
+import { logWarn } from "../ui/report.ts";
 import { emptyScopeMessage, reportModified } from "../ui/status.ts";
 import { skillName } from "../ui/style.ts";
 
@@ -37,8 +37,7 @@ interface DisableOptions extends ScopeOptions {
 
 export const run = async (args: string[], options: DisableOptions): Promise<void> => {
   intro("nik disable");
-  const scope = resolveScope(options, promptWarn) ?? "project";
-  await migrateIfLegacy(scope);
+  const scope = resolveScope(options, logWarn) ?? "project";
 
   const loaded = await loadLock(scope);
   if (Object.keys(loaded.lock.skills).length === 0) {
@@ -60,9 +59,7 @@ export const run = async (args: string[], options: DisableOptions): Promise<void
   }
 
   const agents = new Set(names.flatMap((name) => occupiedLocationAgents(locations.get(name)!)));
-  for (const agent of agents) {
-    await assertSkillsDirSafe(scope, agent).catch((e: Error) => fail(e.message));
-  }
+  await refuseUnsafeSkillsDirs(scope, agents);
   const modified = await modifiedSkills(
     skills.filter((skill) => names.includes(skill.name)),
     scope,
